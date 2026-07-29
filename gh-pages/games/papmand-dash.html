@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>PAPMAND DASH</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#000; overflow:hidden; touch-action:none; overscroll-behavior:none; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000; }
+  canvas { display:block; image-rendering:pixelated; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+"use strict";
+/* ============================================================
+   PAPMAND DASH — a Boulder Dash-style digger for mobile
+   Hold & drag = joystick (step in that direction)
+   Dig dirt · collect diamonds · dodge falling boulders
+   Fill the quota, then find the flashing exit
+   ============================================================ */
+
+const W = 360, H = 640;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function fit() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width  = (W * scale) + 'px';
+  canvas.style.height = (H * scale) + 'px';
+  canvas.width  = Math.floor(W * dpr);
+  canvas.height = Math.floor(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+}
+fit();
+addEventListener('resize', fit);
+
+/* ---------------- audio ---------------- */
+let AC = null;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || 'square';
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(AC.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+const sfx = {
+  dig:   () => beep(rnd(140,190), 0.05, 'triangle', 0.06, -60),
+  gem:   () => beep(rnd(900,1300), 0.1, 'square', 0.05, 300),
+  thud:  () => beep(90, 0.09, 'sawtooth', 0.09, -40),
+  push:  () => beep(70, 0.08, 'triangle', 0.08),
+  boom:  () => { beep(110, 0.3, 'sawtooth', 0.11, -70); beep(55, 0.4, 'triangle', 0.1, -25); },
+  die:   () => beep(350, 0.6, 'sawtooth', 0.11, -300),
+  open:  () => { beep(523,0.09,'square',0.07); setTimeout(()=>beep(659,0.09,'square',0.07),90); setTimeout(()=>beep(784,0.09,'square',0.07),180); setTimeout(()=>beep(1046,0.18,'square',0.07),270); },
+  clear: () => { beep(659,0.1,'square',0.07); setTimeout(()=>beep(880,0.1,'square',0.07),110); setTimeout(()=>beep(1046,0.22,'square',0.07),220); },
+  tick:  () => beep(1200, 0.04, 'square', 0.04)
+};
+
+/* ---------------- helpers ---------------- */
+const rnd = (a,b) => a + Math.random() * (b - a);
+const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
+
+/* ---------------- tiles ---------------- */
+const T = { EMPTY:0, DIRT:1, BRICK:2, STEEL:3, ROCK:4, GEM:5, EXITC:6, EXITO:7, FLY:8, BFLY:9, EXPL:10 };
+const TS = 22;                       /* tile size on screen */
+const CW = 34, CH = 26;              /* cave dimensions */
+const HUD = 50;
+
+/* ---------------- game state ---------------- */
+const game = {
+  state: 'title',        /* title | start | play | dead | clear | gameover */
+  score: 0, hi: 5000, lives: 3, cave: 1,
+  need: 10, got: 0, time: 120,
+  timer: 0, msg: '', msgTimer: 0, flash: 0
+};
+let startRequested = false;
+
+let grid, fall, dirGrid;             /* tile grid, falling flags, enemy directions */
+let expl = [];                       /* {x,y,ttl,to} */
+let player = { x:1, y:1, alive:true, face:1, blink:0, idleT:0 };
+let exitPos = { x:0, y:0 };
+let cam = { x:0, y:0 };
+let tickT = 0, moveT = 0;
+const TICK = 0.15;
+
+const idx = (x,y) => y*CW + x;
+const at  = (x,y) => (x<0||y<0||x>=CW||y>=CH) ? T.STEEL : grid[idx(x,y)];
+const set = (x,y,v) => { if (x>=0&&y>=0&&x<CW&&y<CH) grid[idx(x,y)] = v; };
+
+/* ---------------- cave generation ---------------- */
+function caveParams(n) {
+  return {
+    rockP:  0.16 + Math.min(0.1, n*0.012),
+    gemP:   0.055,
+    brickP: 0.05 + Math.min(0.06, n*0.008),
+    flies:  Math.min(6, 1 + Math.floor(n/1.5)),
+    bflies: n >= 3 ? Math.min(4, Math.floor((n-1)/2)) : 0,
+    need:   8 + n * 2,
+    time:   Math.max(80, 150 - n * 5)
+  };
+}
+
+function genCave(n) {
+  const P = caveParams(n);
+  grid = new Uint8Array(CW*CH);
+  fall = new Uint8Array(CW*CH);
+  dirGrid = new Int8Array(CW*CH);
+  expl = [];
+  let gems = 0;
+
+  for (let y=0;y<CH;y++) for (let x=0;x<CW;x++) {
+    if (x===0||y===0||x===CW-1||y===CH-1) { set(x,y,T.STEEL); continue; }
+    const r = Math.random();
+    if (r < P.gemP) { set(x,y,T.GEM); gems++; }
+    else if (r < P.gemP + P.rockP) set(x,y,T.ROCK);
+    else if (r < P.gemP + P.rockP + P.brickP) set(x,y,T.BRICK);
+    else set(x,y,T.DIRT);
+  }
+  /* guarantee enough gems */
+  while (gems < P.need + 8) {
+    const x = 1 + Math.floor(rnd(0,CW-2)), y = 1 + Math.floor(rnd(0,CH-2));
+    if (at(x,y) === T.DIRT) { set(x,y,T.GEM); gems++; }
+  }
+
+  /* player start: top-left pocket */
+  player.x = 2; player.y = 2; player.alive = true; player.face = 1;
+  for (let y=1;y<=3;y++) for (let x=1;x<=3;x++) set(x,y,T.DIRT);
+  set(2,2,T.EMPTY);
+  set(2,1,T.DIRT); /* no rock above the start */
+
+  /* exit: bottom-right corner, embedded in the border */
+  exitPos = { x: CW-2, y: CH-2 };
+  set(exitPos.x, exitPos.y, T.EXITC);
+  /* keep the approach diggable */
+  if (at(exitPos.x-1, exitPos.y) === T.ROCK) set(exitPos.x-1, exitPos.y, T.DIRT);
+  if (at(exitPos.x, exitPos.y-1) === T.ROCK) set(exitPos.x, exitPos.y-1, T.DIRT);
+
+  /* enemies in carved pockets, away from start */
+  let placed = 0, tries = 0;
+  while (placed < P.flies + P.bflies && tries++ < 400) {
+    const x = 3 + Math.floor(rnd(0,CW-6)), y = 3 + Math.floor(rnd(0,CH-6));
+    if (Math.hypot(x-player.x, y-player.y) < 9) continue;
+    if (at(x,y) !== T.DIRT) continue;
+    /* small cavity so they can start patrolling */
+    set(x,y, placed < P.flies ? T.FLY : T.BFLY);
+    dirGrid[idx(x,y)] = Math.floor(rnd(0,4));
+    if (at(x+1,y) === T.DIRT) set(x+1,y,T.EMPTY);
+    if (at(x,y+1) === T.DIRT) set(x,y+1,T.EMPTY);
+    placed++;
+  }
+
+  game.need = P.need; game.got = 0; game.time = P.time;
+  cam.x = 0; cam.y = 0;
+}
+
+/* ---------------- physics tick (classic scan) ---------------- */
+const ROUND = v => v === T.ROCK || v === T.GEM || v === T.BRICK;
+
+function boom(cx, cy, toGem) {
+  sfx.boom();
+  game.flash = 0.25;
+  for (let y=cy-1;y<=cy+1;y++) for (let x=cx-1;x<=cx+1;x++) {
+    const v = at(x,y);
+    if (v === T.STEEL || v === T.EXITC || v === T.EXITO) continue;
+    if (x === player.x && y === player.y) killPlayer(false);
+    if (v === T.FLY) { set(x,y,T.EMPTY); }          /* chain-adjacent enemies simply removed */
+    if (v === T.BFLY){ set(x,y,T.EMPTY); }
+    set(x,y,T.EXPL);
+    expl.push({ x, y, ttl: 2, to: toGem ? T.GEM : T.EMPTY });
+  }
+}
+
+function killPlayer(withBoom) {
+  if (!player.alive) return;
+  player.alive = false;
+  sfx.die();
+  if (withBoom) boom(player.x, player.y, false);
+  game.state = 'dead';
+  game.timer = 1.6;
+}
+
+function physTick() {
+  /* explosions settle */
+  for (let i = expl.length - 1; i >= 0; i--) {
+    expl[i].ttl--;
+    if (expl[i].ttl <= 0) {
+      if (at(expl[i].x, expl[i].y) === T.EXPL) set(expl[i].x, expl[i].y, expl[i].to);
+      expl.splice(i,1);
+    }
+  }
+
+  /* falling & rolling — scan bottom-up so things fall one cell per tick */
+  for (let y = CH-2; y >= 1; y--) {
+    for (let x = 1; x < CW-1; x++) {
+      const v = at(x,y);
+      if (v !== T.ROCK && v !== T.GEM) continue;
+      const i = idx(x,y);
+      const below = at(x,y+1);
+      const belowIsPlayer = (x === player.x && y+1 === player.y);
+      const belowEnemy = below === T.FLY || below === T.BFLY;
+
+      if (below === T.EMPTY && !belowIsPlayer) {
+        set(x,y,T.EMPTY); set(x,y+1,v);
+        fall[idx(x,y+1)] = 1; fall[i] = 0;
+        continue;
+      }
+      if (fall[i]) {
+        if (belowIsPlayer) { set(x,y,T.EMPTY); set(x,y+1,v); fall[idx(x,y+1)]=1; killPlayer(true); fall[i]=0; continue; }
+        if (belowEnemy)   { const gem = below === T.BFLY; set(x,y+1,T.EMPTY); boom(x, y+1, gem); fall[i]=0; continue; }
+      }
+      /* roll off rounded things */
+      if (ROUND(below)) {
+        const pl = (player.x === x-1 && player.y === y) || (player.x === x-1 && player.y === y+1);
+        const pr = (player.x === x+1 && player.y === y) || (player.x === x+1 && player.y === y+1);
+        if (at(x-1,y) === T.EMPTY && at(x-1,y+1) === T.EMPTY && !pl) {
+          set(x,y,T.EMPTY); set(x-1,y,v); fall[idx(x-1,y)] = 1; fall[i]=0; continue;
+        }
+        if (at(x+1,y) === T.EMPTY && at(x+1,y+1) === T.EMPTY && !pr) {
+          set(x,y,T.EMPTY); set(x+1,y,v); fall[idx(x+1,y)] = 1; fall[i]=0; continue;
+        }
+      }
+      if (fall[i]) { fall[i] = 0; sfx.thud(); }
+    }
+  }
+
+  /* enemies: wall followers (FLY turns left, BFLY turns right) */
+  const DX = [0,1,0,-1], DY = [-1,0,1,0];
+  const moved = new Set();
+  for (let y=1;y<CH-1;y++) for (let x=1;x<CW-1;x++) {
+    const v = at(x,y);
+    if (v !== T.FLY && v !== T.BFLY) continue;
+    const key = idx(x,y);
+    if (moved.has(key)) continue;
+
+    /* touch player -> explode */
+    let adj = false;
+    for (let d=0;d<4;d++) if (x+DX[d]===player.x && y+DY[d]===player.y) adj = true;
+    if (adj && player.alive) { boom(x,y, v===T.BFLY); continue; }
+
+    const dir = dirGrid[key];
+    const pref = v === T.FLY
+      ? [ (dir+3)%4, dir, (dir+1)%4, (dir+2)%4 ]
+      : [ (dir+1)%4, dir, (dir+3)%4, (dir+2)%4 ];
+    let did = false;
+    for (const d of pref) {
+      const nx = x+DX[d], ny = y+DY[d];
+      if (at(nx,ny) === T.EMPTY && !(nx===player.x && ny===player.y)) {
+        set(x,y,T.EMPTY); set(nx,ny,v);
+        dirGrid[idx(nx,ny)] = d;
+        moved.add(idx(nx,ny));
+        did = true;
+        break;
+      }
+    }
+    if (!did) dirGrid[key] = (dir+2)%4;
+  }
+}
+
+/* ---------------- player movement ---------------- */
+function tryMove(dx, dy) {
+  if (!player.alive || game.state !== 'play') return;
+  const nx = player.x + dx, ny = player.y + dy;
+  const v = at(nx,ny);
+  if (dx !== 0) player.face = dx;
+
+  if (v === T.DIRT)  { set(nx,ny,T.EMPTY); stepTo(nx,ny); sfx.dig(); return; }
+  if (v === T.EMPTY) { stepTo(nx,ny); return; }
+  if (v === T.GEM)   {
+    set(nx,ny,T.EMPTY); stepTo(nx,ny);
+    game.got++;
+    game.score += game.got > game.need ? 25 : 10;
+    if (game.score > game.hi) game.hi = game.score;
+    sfx.gem();
+    if (game.got === game.need) {
+      set(exitPos.x, exitPos.y, T.EXITO);
+      sfx.open();
+      game.msg = 'UDGANGEN ER ÅBEN!'; game.msgTimer = 2;
+    }
+    return;
+  }
+  if (v === T.ROCK && dy === 0 && at(nx+dx, ny) === T.EMPTY && !fall[idx(nx,ny)]) {
+    /* push a boulder sideways */
+    set(nx+dx, ny, T.ROCK); set(nx,ny,T.EMPTY);
+    stepTo(nx,ny); sfx.push();
+    return;
+  }
+  if (v === T.EXITO) {
+    stepTo(nx,ny);
+    game.state = 'clear';
+    game.timer = 2.2;
+    const bonus = Math.floor(game.time) * 2;
+    game.score += bonus;
+    if (game.score > game.hi) game.hi = game.score;
+    game.msg = 'GRUBE KLARET  +' + bonus; game.msgTimer = 2.2;
+    sfx.clear();
+  }
+}
+function stepTo(nx,ny) { player.x = nx; player.y = ny; player.idleT = 0; }
+
+/* ---------------- input: floating joystick ---------------- */
+const input = { touching:false, ox:0, oy:0, dx:0, dy:0 };
+function pt(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: ((e.clientX - r.left)/r.width)*W, y: ((e.clientY - r.top)/r.height)*H };
+}
+canvas.addEventListener('pointerdown', e => {
+  audio();
+  const p = pt(e);
+  input.touching = true;
+  input.ox = p.x; input.oy = p.y; input.dx = 0; input.dy = 0;
+  if (game.state === 'title' || game.state === 'gameover') startRequested = true;
+  e.preventDefault();
+});
+canvas.addEventListener('pointermove', e => {
+  if (!input.touching) return;
+  const p = pt(e);
+  input.dx = p.x - input.ox; input.dy = p.y - input.oy;
+  /* joystick recenters if you drag far, so direction changes feel snappy */
+  const m = Math.hypot(input.dx, input.dy);
+  if (m > 60) { input.ox = p.x - input.dx/m*60; input.oy = p.y - input.dy/m*60; }
+  e.preventDefault();
+});
+addEventListener('pointerup',     () => { input.touching = false; input.dx = input.dy = 0; });
+addEventListener('pointercancel', () => { input.touching = false; input.dx = input.dy = 0; });
+
+function heldDir() {
+  const m = Math.hypot(input.dx, input.dy);
+  if (!input.touching || m < 18) return null;
+  if (Math.abs(input.dx) > Math.abs(input.dy)) return [Math.sign(input.dx), 0];
+  return [0, Math.sign(input.dy)];
+}
+
+/* ---------------- update ---------------- */
+function startCave() {
+  genCave(game.cave);
+  game.state = 'play';
+  game.msg = 'GRUBE ' + game.cave + '  ·  ' + game.need + ' DIAMANTER';
+  game.msgTimer = 2.2;
+}
+
+function update(dt) {
+  if (game.msgTimer > 0) game.msgTimer -= dt;
+  if (game.flash > 0) game.flash -= dt;
+
+  if (game.state === 'title' || game.state === 'gameover') {
+    if (startRequested) {
+      startRequested = false;
+      game.score = 0; game.lives = 3; game.cave = 1;
+      startCave();
+    }
+    return;
+  }
+
+  if (game.state === 'dead') {
+    game.timer -= dt;
+    if (game.timer <= 0) {
+      if (game.lives > 1) { game.lives--; startCave(); }
+      else { game.lives = 0; game.state = 'gameover'; }
+    }
+  }
+
+  if (game.state === 'clear') {
+    game.timer -= dt;
+    if (game.timer <= 0) { game.cave++; startCave(); }
+  }
+
+  if (game.state === 'play') {
+    /* countdown */
+    const before = Math.ceil(game.time);
+    game.time -= dt;
+    const now = Math.ceil(game.time);
+    if (now <= 10 && now !== before && now > 0) sfx.tick();
+    if (game.time <= 0) { game.time = 0; killPlayer(true); }
+
+    /* stepped movement while joystick held */
+    moveT -= dt;
+    const d = heldDir();
+    if (d && moveT <= 0) { tryMove(d[0], d[1]); moveT = 0.13; }
+    if (!d) moveT = 0;
+
+    /* physics */
+    tickT += dt;
+    while (tickT >= TICK) { tickT -= TICK; physTick(); }
+
+    player.idleT += dt;
+    player.blink -= dt;
+    if (player.blink < -rnd(2,4)) player.blink = 0.15;
+  }
+
+  /* camera follows player */
+  const vw = W, vh = H - HUD;
+  const tx = clamp(player.x*TS + TS/2 - vw/2, 0, CW*TS - vw);
+  const ty = clamp(player.y*TS + TS/2 - vh/2, 0, CH*TS - vh);
+  cam.x += (tx - cam.x) * Math.min(1, dt*6);
+  cam.y += (ty - cam.y) * Math.min(1, dt*6);
+}
+
+/* ---------------- drawing ---------------- */
+function text(str, x, y, size, col, align) {
+  ctx.font = '700 ' + size + 'px "Courier New", monospace';
+  ctx.textAlign = align || 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#000';
+  ctx.fillText(str, x+1.5, y+1.5);
+  ctx.fillStyle = col;
+  ctx.fillText(str, x, y);
+}
+
+function drawTile(v, sx, sy, x, y, t) {
+  switch (v) {
+    case T.DIRT: {
+      ctx.fillStyle = '#7a4b21';
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.fillStyle = '#8f5a2a';
+      if ((x*7+y*13)%3===0) ctx.fillRect(sx+3, sy+4, 4, 3);
+      if ((x*5+y*11)%4===0) ctx.fillRect(sx+12, sy+11, 5, 3);
+      ctx.fillStyle = '#5e3817';
+      if ((x*3+y*7)%3===1) ctx.fillRect(sx+8, sy+15, 5, 3);
+      if ((x*11+y*3)%5===2) ctx.fillRect(sx+14, sy+3, 4, 3);
+      break;
+    }
+    case T.BRICK: {
+      ctx.fillStyle = '#b3402e';
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.fillStyle = '#d9d0c4';
+      ctx.fillRect(sx, sy+10, TS, 2);
+      ctx.fillRect(sx + ((y%2)?5:14), sy, 2, 10);
+      ctx.fillRect(sx + ((y%2)?14:5), sy+12, 2, 10);
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      ctx.fillRect(sx, sy, TS, 2);
+      break;
+    }
+    case T.STEEL: {
+      ctx.fillStyle = '#5b6472';
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.fillStyle = '#788292';
+      ctx.fillRect(sx+2, sy+2, TS-4, TS-4);
+      ctx.fillStyle = '#454d59';
+      ctx.fillRect(sx+2, sy+TS-4, TS-4, 2);
+      ctx.fillRect(sx+TS-4, sy+2, 2, TS-4);
+      ctx.fillStyle = '#9aa5b5';
+      ctx.fillRect(sx+4, sy+4, 3, 3);
+      break;
+    }
+    case T.ROCK: {
+      ctx.fillStyle = '#9aa0a8';
+      ctx.beginPath();
+      ctx.arc(sx+TS/2, sy+TS/2, TS/2-2, 0, 6.28);
+      ctx.fill();
+      ctx.fillStyle = '#c3c9d1';
+      ctx.beginPath();
+      ctx.arc(sx+TS/2-3, sy+TS/2-3, TS/5, 0, 6.28);
+      ctx.fill();
+      ctx.fillStyle = '#6d737b';
+      ctx.beginPath();
+      ctx.arc(sx+TS/2+3, sy+TS/2+4, TS/4.5, 0, 6.28);
+      ctx.fill();
+      break;
+    }
+    case T.GEM: {
+      const tw = 0.6 + 0.4*Math.sin(t*5 + x*1.7 + y*2.3);
+      const cx = sx+TS/2, cy = sy+TS/2, r = TS/2-3;
+      ctx.fillStyle = `rgba(80,220,255,${0.85})`;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy-r); ctx.lineTo(cx+r, cy); ctx.lineTo(cx, cy+r); ctx.lineTo(cx-r, cy);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = `rgba(255,255,255,${0.5*tw})`;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy-r+3); ctx.lineTo(cx+3, cy); ctx.lineTo(cx, cy+3); ctx.lineTo(cx-3, cy);
+      ctx.closePath(); ctx.fill();
+      if (tw > 0.9) { ctx.fillStyle = '#fff'; ctx.fillRect(cx+r-4, cy-r+1, 2, 2); }
+      break;
+    }
+    case T.EXITC: {
+      ctx.fillStyle = '#454d59';
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.strokeStyle = '#5b6472';
+      ctx.strokeRect(sx+3.5, sy+3.5, TS-7, TS-7);
+      break;
+    }
+    case T.EXITO: {
+      const on = Math.floor(t*6)%2===0;
+      ctx.fillStyle = on ? '#ffd21f' : '#454d59';
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.fillStyle = on ? '#20242e' : '#ffd21f';
+      ctx.fillRect(sx+6, sy+4, TS-12, TS-8);
+      break;
+    }
+    case T.FLY: {
+      const wob = Math.sin(t*10 + x*3+y);
+      ctx.fillStyle = '#ff8c1a';
+      ctx.beginPath();
+      ctx.arc(sx+TS/2, sy+TS/2, TS/3 + wob, 0, 6.28);
+      ctx.fill();
+      ctx.fillStyle = '#fff6d0';
+      ctx.fillRect(sx+TS/2-5, sy+TS/2-3, 3, 3);
+      ctx.fillRect(sx+TS/2+2, sy+TS/2-3, 3, 3);
+      ctx.strokeStyle = 'rgba(255,140,26,0.6)';
+      ctx.beginPath();
+      ctx.arc(sx+TS/2, sy+TS/2, TS/2-2 + wob, 0, 6.28);
+      ctx.stroke();
+      break;
+    }
+    case T.BFLY: {
+      const fl = Math.sin(t*12 + x)*3;
+      ctx.fillStyle = '#c86bff';
+      ctx.beginPath();
+      ctx.ellipse(sx+TS/2-5, sy+TS/2, 5, 8+fl, 0.4, 0, 6.28);
+      ctx.ellipse(sx+TS/2+5, sy+TS/2, 5, 8-fl, -0.4, 0, 6.28);
+      ctx.fill();
+      ctx.fillStyle = '#f2e8ff';
+      ctx.fillRect(sx+TS/2-1, sy+4, 2, TS-8);
+      break;
+    }
+    case T.EXPL: {
+      ctx.fillStyle = ['#fff6d0','#ffd21f','#ff8c1a'][Math.floor(t*20)%3];
+      ctx.fillRect(sx+2, sy+2, TS-4, TS-4);
+      ctx.fillStyle = '#ff4f6d';
+      ctx.fillRect(sx+6, sy+6, TS-12, TS-12);
+      break;
+    }
+  }
+}
+
+function drawPapmand(sx, sy, t) {
+  /* the cardboard man */
+  const bob = player.idleT > 0.2 ? Math.sin(t*3)*0.5 : 0;
+  sy += bob;
+  /* body: cardboard */
+  ctx.fillStyle = '#c99a5b';
+  ctx.fillRect(sx+4, sy+7, TS-8, TS-9);
+  /* corrugated edge */
+  ctx.fillStyle = '#a87b40';
+  for (let i=0;i<4;i++) ctx.fillRect(sx+5+i*4, sy+TS-4, 2, 2);
+  /* tape stripe */
+  ctx.fillStyle = 'rgba(220,230,240,0.75)';
+  ctx.fillRect(sx+4, sy+11, TS-8, 3);
+  /* head: box */
+  ctx.fillStyle = '#d9ae6e';
+  ctx.fillRect(sx+6, sy+1, TS-12, 8);
+  ctx.strokeStyle = '#a87b40';
+  ctx.strokeRect(sx+6.5, sy+1.5, TS-13, 7);
+  /* eyes follow facing; blink */
+  ctx.fillStyle = '#20242e';
+  if (player.blink > 0) {
+    ctx.fillRect(sx+8, sy+5, 3, 1); ctx.fillRect(sx+13, sy+5, 3, 1);
+  } else {
+    const off = player.face > 0 ? 1 : -1;
+    ctx.fillRect(sx+8+off, sy+3, 2, 3); ctx.fillRect(sx+12+off, sy+3, 2, 3);
+  }
+  /* arms */
+  ctx.fillStyle = '#c99a5b';
+  ctx.fillRect(sx+1, sy+9, 3, 6);
+  ctx.fillRect(sx+TS-4, sy+9, 3, 6);
+}
+
+function draw(dt) {
+  const t = performance.now()/1000;
+  ctx.fillStyle = '#000008';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(0, HUD);
+  ctx.beginPath(); ctx.rect(0, 0, W, H-HUD); ctx.clip();
+  ctx.translate(-Math.round(cam.x), -Math.round(cam.y));
+
+  const x0 = clamp(Math.floor(cam.x/TS)-1, 0, CW), x1 = clamp(Math.ceil((cam.x+W)/TS)+1, 0, CW);
+  const y0 = clamp(Math.floor(cam.y/TS)-1, 0, CH), y1 = clamp(Math.ceil((cam.y+H-HUD)/TS)+1, 0, CH);
+  for (let y=y0;y<y1;y++) for (let x=x0;x<x1;x++) {
+    const v = grid[idx(x,y)];
+    if (v !== T.EMPTY) drawTile(v, x*TS, y*TS, x, y, t);
+  }
+
+  if (player.alive && (game.state === 'play' || game.state === 'clear')) {
+    drawPapmand(player.x*TS, player.y*TS, t);
+  }
+
+  ctx.restore();
+
+  /* explosion flash */
+  if (game.flash > 0) {
+    ctx.fillStyle = 'rgba(255,220,150,' + (game.flash*1.6) + ')';
+    ctx.fillRect(0, HUD, W, H-HUD);
+  }
+
+  /* ---------------- HUD ---------------- */
+  ctx.fillStyle = '#10131c';
+  ctx.fillRect(0, 0, W, HUD);
+  ctx.fillStyle = '#20242e';
+  ctx.fillRect(0, HUD-2, W, 2);
+
+  /* diamond counter */
+  const quota = game.got >= game.need;
+  ctx.fillStyle = quota ? '#ffd21f' : '#50dcff';
+  ctx.beginPath();
+  ctx.moveTo(16, 12); ctx.lineTo(24, 20); ctx.lineTo(16, 28); ctx.lineTo(8, 20);
+  ctx.closePath(); ctx.fill();
+  text(game.got + '/' + game.need, 32, 20, 14, quota ? '#ffd21f' : '#ffffff', 'left');
+
+  /* time */
+  const tCol = game.time < 15 ? (Math.floor(t*4)%2 ? '#ff2244' : '#ff8c1a') : '#ffffff';
+  text('TID ' + Math.ceil(game.time), W/2, 20, 13, tCol);
+
+  /* score */
+  text(('' + game.score).padStart(6,'0'), W - 12, 20, 13, '#ffffff', 'right');
+
+  /* second row: cave, lives */
+  text('GRUBE ' + game.cave, 12, 39, 10, '#39d5ff', 'left');
+  for (let i=0;i<game.lives;i++) {
+    ctx.fillStyle = '#c99a5b';
+    ctx.fillRect(W - 18 - i*16, 34, 10, 11);
+    ctx.fillStyle = 'rgba(220,230,240,0.75)';
+    ctx.fillRect(W - 18 - i*16, 38, 10, 2);
+  }
+  text('HI ' + game.hi, W/2, 39, 10, '#c9d4e0');
+
+  /* joystick ghost */
+  if (input.touching && game.state === 'play') {
+    ctx.globalAlpha = 0.25;
+    ctx.strokeStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(input.ox, input.oy, 28, 0, 6.28); ctx.stroke();
+    const m = Math.hypot(input.dx, input.dy) || 1;
+    const kx = input.ox + input.dx/m*Math.min(m,28), ky = input.oy + input.dy/m*Math.min(m,28);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(kx, ky, 10, 0, 6.28); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  if (game.msgTimer > 0 && game.msg) {
+    ctx.globalAlpha = clamp(game.msgTimer, 0, 1);
+    text(game.msg, W/2, H*0.3, 15, '#ffd21f');
+    ctx.globalAlpha = 1;
+  }
+
+  if (game.state === 'title') {
+    ctx.fillStyle = 'rgba(0,0,10,0.6)';
+    ctx.fillRect(0, 0, W, H);
+    text('PAPMAND', W/2, H*0.22, 42, '#c99a5b');
+    text('DASH', W/2, H*0.29, 34, '#50dcff');
+    /* mini legend */
+    drawTile(T.GEM, W/2-88, H*0.38, 1, 1, t);   text('saml diamanter', W/2-58, H*0.38+11, 11, '#50dcff', 'left');
+    drawTile(T.ROCK, W/2-88, H*0.44, 1, 1, t);  text('pas på faldende sten', W/2-58, H*0.44+11, 11, '#c9d4e0', 'left');
+    drawTile(T.FLY, W/2-88, H*0.50, 2, 2, t);   text('undgå væsnerne', W/2-58, H*0.50+11, 11, '#ff8c1a', 'left');
+    drawTile(T.EXITO, W/2-88, H*0.56, 1, 1, t); text('find den blinkende udgang', W/2-58, H*0.56+11, 11, '#ffd21f', 'left');
+    if (Math.floor(performance.now()/500) % 2 === 0)
+      text('TRYK FOR AT STARTE', W/2, H*0.68, 16, '#ffffff');
+    text('hold & træk = joystick', W/2, H*0.75, 11, '#c9d4e0');
+    text('lilla sommerfugle bliver til diamanter…', W/2, H*0.80, 10, '#c86bff');
+  }
+
+  if (game.state === 'gameover') {
+    ctx.fillStyle = 'rgba(0,0,10,0.6)';
+    ctx.fillRect(0, 0, W, H);
+    text('GAME OVER', W/2, H*0.4, 28, '#ff2244');
+    text('SCORE  ' + game.score, W/2, H*0.48, 16, '#ffffff');
+    text('GRUBE ' + game.cave, W/2, H*0.53, 12, '#39d5ff');
+    if (game.score >= game.hi) text('NY REKORD!', W/2, H*0.58, 13, '#ffd21f');
+    if (Math.floor(performance.now()/500) % 2 === 0)
+      text('TRYK FOR AT PRØVE IGEN', W/2, H*0.66, 14, '#ffffff');
+  }
+}
+
+/* ---------------- loop ---------------- */
+genCave(1);          /* background for the title screen */
+game.state = 'title';
+let last = performance.now();
+function loop(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.05) dt = 0.05;
+  update(dt);
+  draw(dt);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>The Arcade</title>
+<style>
+  :root {
+    --ink:   #e8e2f4;
+    --dim:   #8f88a8;
+    --line:  #2a2340;
+    --panel: #140f22;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    min-height:100%;
+    background:
+      radial-gradient(ellipse at 50% -10%, #241a3d 0%, #0b0714 55%, #06040d 100%);
+    color:var(--ink);
+    font-family: Georgia, "Times New Roman", serif;
+    padding: 40px 20px 64px;
+  }
+  .stars { position:fixed; inset:0; pointer-events:none; z-index:0; }
+  .wrap { position:relative; z-index:1; max-width: 760px; margin:0 auto; }
+  header { text-align:center; margin-bottom: 40px; }
+  h1 { font-size: clamp(34px, 8vw, 58px); letter-spacing:.02em; line-height:1.05; }
+  h1 span { display:block; font-size:.42em; color:var(--dim); letter-spacing:.34em;
+            margin-top:14px; text-transform:uppercase; }
+  .grid { display:grid; gap:14px; }
+  a.card {
+    display:block; padding:18px 20px; text-decoration:none; color:inherit;
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    transition: border-color .18s, transform .18s, background .18s;
+  }
+  a.card:hover { border-color:#5b4a8c; background:#191230; transform: translateY(-2px); }
+  .title { font-size:21px; display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .dot { width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
+  .desc { color:var(--dim); font-size:14px; margin-top:7px; line-height:1.5; }
+  .tag { font-family: "Courier New", monospace; font-size:11px; color:#6f6790;
+         border:1px solid var(--line); border-radius:20px; padding:2px 9px; }
+  h2 { font-size:13px; letter-spacing:.24em; text-transform:uppercase;
+       color:var(--dim); margin:34px 0 12px; font-weight:normal; }
+  footer { text-align:center; color:#544d70; font-size:12px; margin-top:44px; line-height:1.7; }
+</style>
+</head>
+<body>
+<canvas class="stars" id="stars"></canvas>
+<div class="wrap">
+  <header>
+    <h1>The Arcade<span>five games, one page</span></h1>
+  </header>
+
+  <h2>Touch &mdash; built for phones</h2>
+  <div class="grid">
+    <a class="card" href="games/ghost-hunter.html">
+      <div class="title"><span class="dot" style="background:#7cf29a"></span>Ghost Hunter</div>
+      <div class="desc">A cemetery shooter rebuilt from the original 2010 Flash source &mdash;
+        werewolves, vampires, a tractor-beam of ghouls, three bosses and a seven-scene campaign.</div>
+    </a>
+    <a class="card" href="games/nova-squadron.html">
+      <div class="title"><span class="dot" style="background:#7d76fc"></span>Nova Squadron
+        <span class="tag">MSX1</span></div>
+      <div class="desc">A fixed shooter written to 1983 hardware rules: one colour per sprite,
+        four sprites per scanline, three square-wave voices.</div>
+    </a>
+    <a class="card" href="games/nova-squadron-7800.html">
+      <div class="title"><span class="dot" style="background:#d67c18"></span>Nova Squadron
+        <span class="tag">Atari 7800</span></div>
+      <div class="desc">The same game on MARIA and TIA instead: wide pixels, multi-coloured
+        sprites, and two channels that cannot quite play in tune.</div>
+    </a>
+    <a class="card" href="games/delta-run.html">
+      <div class="title"><span class="dot" style="background:#39d5ff"></span>Delta Run</div>
+      <div class="desc">Fly the river, mind the fuel. Throttle down over the barges,
+        shoot the bridge, and the next sector opens.</div>
+    </a>
+    <a class="card" href="games/papmand-dash.html">
+      <div class="title"><span class="dot" style="background:#c99a5b"></span>Papmand Dash</div>
+      <div class="desc">Dig, collect, and drop boulders on things. Butterflies burst into
+        diamonds if you time it right.</div>
+    </a>
+  </div>
+
+  <h2>Keyboard &mdash; for a desktop</h2>
+  <div class="grid">
+    <a class="card" href="games/delta-run-desktop.html">
+      <div class="title"><span class="dot" style="background:#39d5ff"></span>Delta Run
+        <span class="tag">arrows + space</span></div>
+      <div class="desc">Arrows steer and throttle, space fires, P pauses.</div>
+    </a>
+    <a class="card" href="games/papmand-dash-desktop.html">
+      <div class="title"><span class="dot" style="background:#c99a5b"></span>Papmand Dash
+        <span class="tag">arrows + P</span></div>
+      <div class="desc">Arrows or WASD to dig, P to pause.</div>
+    </a>
+  </div>
+
+  <footer>
+    Add to Home Screen for a fullscreen, offline arcade.<br>
+    High scores are kept on the device you play on.
+  </footer>
+</div>
+
+<script>
+/* a quiet starfield, matching the games */
+const c = document.getElementById('stars'), x = c.getContext('2d');
+let stars = [];
+function size() {
+  c.width = innerWidth; c.height = innerHeight;
+  stars = Array.from({ length: Math.round(innerWidth * innerHeight / 9000) }, () => ({
+    x: Math.random() * c.width, y: Math.random() * c.height,
+    r: Math.random() * 1.3 + 0.2, p: Math.random() * 6.28,
+    s: Math.random() * 0.5 + 0.15
+  }));
+}
+size(); addEventListener('resize', size);
+(function tick(t) {
+  x.clearRect(0, 0, c.width, c.height);
+  for (const s of stars) {
+    s.p += 0.02 * s.s;
+    x.globalAlpha = 0.25 + 0.55 * Math.abs(Math.sin(s.p));
+    x.fillStyle = '#cfd8ff';
+    x.fillRect(s.x, s.y, s.r, s.r);
+  }
+  x.globalAlpha = 1;
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

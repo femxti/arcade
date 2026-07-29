@@ -1,0 +1,1145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>NOVA SQUADRON</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#000; overflow:hidden; touch-action:none; overscroll-behavior:none; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000; }
+  canvas { display:block; image-rendering: pixelated; image-rendering: crisp-edges; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+"use strict";
+/* ============================================================
+   NOVA SQUADRON  —  Atari 7800 edition
+   Built to the ProSystem's hardware:
+     MARIA  : 160x240-class display, so pixels are twice as wide as
+              they are tall; 256-colour palette (16 hues x 16 lumas);
+              sprites may carry up to 12 colours (mode 160B) and MARIA
+              streams them from display lists, so nothing flickers.
+     TIA    : the same 1977 chip the 2600 used, doing audio only here.
+              TWO channels. 4-bit volume. A 5-bit divider off a 31.4 kHz
+              clock, which is why nothing it plays is quite in tune.
+              Timbres come from real polynomial counters, emulated below.
+   Gameplay follows the 1981 arcade rules.
+   ============================================================ */
+
+/* ---------------- MARIA display ----------------
+   Logic runs in 360x640 game units. The frame buffer is 160 columns
+   wide and 320 rows tall, so a MARIA pixel is 2.25 units across and
+   2 units down: wide pixels, exactly like the 160-mode the console
+   used for nearly every game.                                       */
+const W = 360, H = 640;
+const DW = 160, DH = 320;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+canvas.width = DW; canvas.height = DH;
+
+function fit() {
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width  = Math.floor(W * scale) + 'px';
+  canvas.style.height = Math.floor(H * scale) + 'px';
+  ctx.setTransform(DW / W, 0, 0, DH / H, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+}
+fit();
+addEventListener('resize', fit);
+
+/* ---------------- the Atari 256-colour palette ----------------
+   16 hues x 16 luminances, generated through NTSC YIQ the way the
+   console's colour burst produces them. Hue 0 is the grey ramp.     */
+function atari(hue, luma) {
+  const y = 0.05 + (luma & 15) * 0.0625;
+  if ((hue & 15) === 0) {
+    const v = Math.round(clamp8(y) * 255);
+    return `rgb(${v},${v},${v})`;
+  }
+  const phase = ((hue & 15) - 1) * 25.0 - 58.0;
+  const rad = phase * Math.PI / 180;
+  const sat = 0.34;
+  const i = sat * Math.cos(rad), q = sat * Math.sin(rad);
+  const r = clamp8(y + 0.956 * i + 0.621 * q);
+  const g = clamp8(y - 0.272 * i - 0.647 * q);
+  const b = clamp8(y - 1.106 * i + 1.703 * q);
+  return `rgb(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)})`;
+}
+function clamp8(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+/* the 25-ish colours this game keeps on screen */
+const P = {
+  BLACK:  atari(0, 0),
+  GREY:   atari(0, 8),
+  WHITE:  atari(0, 14),
+  BRIGHT: atari(0, 15),
+  /* bees: blue */
+  BLUE_D: atari(8, 4),  BLUE:  atari(8, 8),  BLUE_L: atari(8, 12), BLUE_P: atari(8, 14),
+  /* butterflies: red into orange */
+  RED_D:  atari(3, 4),  RED:   atari(3, 8),  RED_L:  atari(3, 12),
+  ORANGE: atari(2, 9),  AMBER: atari(1, 11),
+  /* bosses: green, and magenta once wounded */
+  GRN_D:  atari(13, 4), GRN:   atari(13, 8), GRN_L:  atari(13, 12),
+  MAG_D:  atari(5, 4),  MAG:   atari(5, 8),  MAG_L:  atari(5, 12),
+  /* the rest */
+  CYAN:   atari(9, 11), YELLOW: atari(15, 11), GOLD: atari(1, 9),
+  PURPLE: atari(6, 9),  TEAL:  atari(10, 9)
+};
+
+/* ---------------- TIA audio ----------------
+   Two channels. Timbre comes from the chip's polynomial counters,
+   generated here bit for bit, then clocked by the 5-bit divider.   */
+let AC = null;
+const TIA_CLOCK = 31399.5;          /* NTSC: 3.579545 MHz / 114 */
+const tiaChan = [0, 0];             /* when each of the two voices frees up */
+const bufCache = {};
+
+/* the shift-register sequences the chip actually produces */
+function polySeq(bits, tapA, tapB) {
+  const out = [];
+  let s = (1 << bits) - 1;
+  const len = (1 << bits) - 1;
+  for (let i = 0; i < len; i++) {
+    out.push(s & 1);
+    const fb = ((s >> tapA) ^ (s >> tapB)) & 1;
+    s = (s >> 1) | (fb << (bits - 1));
+  }
+  return out;
+}
+const SEQ = {
+  4:  [1, 0],                                   /* pure tone, divide by 2   */
+  12: [1, 1, 1, 0, 0, 0],                       /* pure tone, divide by 6   */
+  1:  polySeq(4, 0, 1),                         /* 4-bit poly: buzzy        */
+  7:  polySeq(5, 0, 2),                         /* 5-bit poly: gritty       */
+  8:  polySeq(9, 0, 4)                          /* 9-bit poly: white noise  */
+};
+
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+/* the 5-bit divider is why the console can never hit a true A440 */
+function audfFor(freq, mode) {
+  const div = SEQ[mode].length;
+  return Math.max(0, Math.min(31, Math.round(TIA_CLOCK / (freq * div) - 1)));
+}
+function tiaBuffer(mode, audf) {
+  const key = mode + ':' + audf;
+  if (bufCache[key]) return bufCache[key];
+  const bits = SEQ[mode];
+  const bitRate = TIA_CLOCK / (audf + 1);
+  const sr = AC.sampleRate;
+  const spb = sr / bitRate;
+  const len = Math.max(2, Math.round(bits.length * spb));
+  const buf = AC.createBuffer(1, len, sr);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = bits[Math.floor(i / spb) % bits.length] ? 0.85 : -0.85;
+  bufCache[key] = buf;
+  return buf;
+}
+/* play a note on one of the two voices; vol is the chip's 0-15 scale */
+function tia(mode, audf, dur, vol) {
+  if (!AC) return;
+  const t = AC.currentTime;
+  let ch = 0;
+  if (tiaChan[0] <= t) ch = 0;
+  else if (tiaChan[1] <= t) ch = 1;
+  else ch = tiaChan[0] <= tiaChan[1] ? 0 : 1;   /* steal the older voice */
+  tiaChan[ch] = t + dur;
+  const src = AC.createBufferSource();
+  src.buffer = tiaBuffer(mode, Math.max(0, Math.min(31, audf | 0)));
+  src.loop = true;
+  const g = AC.createGain();
+  const v = (vol / 15) * 0.16;
+  g.gain.setValueAtTime(v, t);
+  g.gain.setValueAtTime(v, t + dur * 0.8);
+  g.gain.linearRampToValueAtTime(0.0001, t + dur);
+  src.connect(g); g.connect(AC.destination);
+  src.start(t); src.stop(t + dur + 0.02);
+}
+/* A note by pitch. With only 32 dividers per waveform, no single mode
+   spans the scale: divide-by-2 bottoms out near 490 Hz, so anything under
+   that goes to the divide-by-6 tone, which is what composers did on the
+   real chip. What comes out is close to the note asked for, never exact. */
+function note(freq, dur, vol, mode) {
+  const m = (mode !== undefined) ? mode : (freq < 500 ? 12 : 4);
+  tia(m, audfFor(freq, m), dur, vol === undefined ? 10 : vol);
+}
+/* a sweep is done the way the hardware does it: stepping AUDF frame by frame */
+function sweep(mode, fromAudf, toAudf, steps, stepDur, vol) {
+  for (let i = 0; i < steps; i++) {
+    const a = Math.round(fromAudf + (toAudf - fromAudf) * (i / (steps - 1)));
+    setTimeout(() => tia(mode, a, stepDur * 1.4, vol), i * stepDur * 1000);
+  }
+}
+const tune = (freqs, gap, dur, vol, mode) =>
+  freqs.forEach((f, i) => { if (f) setTimeout(() => note(f, dur, vol, mode), i * gap); });
+
+const sfx = {
+  fire:    () => sweep(4, 2, 14, 5, 0.014, 8),
+  hitBee:  () => sweep(8, 3, 15, 7, 0.022, 11),
+  hitFly:  () => { sweep(8, 4, 14, 6, 0.022, 11); tune([600, 380, 600, 340], 45, 0.05, 8, 1); },
+  hitBoss: () => { sweep(8, 1, 22, 12, 0.026, 13); },
+  bossHurt:() => sweep(4, 12, 2, 4, 0.016, 9),
+  dive:    () => sweep(1, 4, 20, 8, 0.026, 7),
+  beam:    () => { for (let i = 0; i < 10; i++) setTimeout(() => tia(7, i % 2 ? 9 : 15, 0.08, 8), i * 90); },
+  capture: () => sweep(12, 3, 28, 10, 0.06, 10),
+  rescue:  () => tune([392, 523, 659, 784, 1046], 70, 0.11, 11),
+  die:     () => { sweep(8, 2, 26, 12, 0.04, 13); sweep(1, 6, 24, 8, 0.05, 8); },
+  stage:   () => tune([523, 659, 784], 95, 0.11, 11),
+  chal:    () => tune([523, 659, 784, 1046, 784, 1046], 95, 0.1, 11),
+  perfect: () => tune([523, 659, 784, 1046, 1318, 1046, 1318, 1568], 95, 0.13, 12),
+  bonus:   () => tune([784, 1046, 1318], 70, 0.1, 11),
+  extra:   () => tune([1046, 1318, 1568, 2093], 60, 0.1, 12),
+  coin:    () => tune([1568, 2093], 60, 0.07, 10)
+};
+
+/* the low pulse under play, quickening as the formation thins */
+let throbT = 0;
+function throb(dt, frac) {
+  if (game.state !== 'play' && game.state !== 'entering') return;
+  throbT -= dt;
+  if (throbT <= 0) {
+    tia(12, 26 - Math.round((1 - frac) * 8), 0.08, 7);
+    throbT = 0.16 + frac * 0.7;
+  }
+}
+
+/* ---------------- 8x8 font ---------------- */
+const FONT = {
+  '0':'7CC6CEDEF6E67C00','1':'3070303030307800','2':'78CC0C3860CCFC00','3':'78CC0C380CCC7800',
+  '4':'1C3C6CCCFE0C1E00','5':'FCC0F80C0CCC7800','6':'3860C0F8CCCC7800','7':'FCCC0C1830303000',
+  '8':'78CCCC78CCCC7800','9':'78CCCC7C0C187000',
+  'A':'3078CCCCFCCCCC00','B':'FC66667C6666FC00','C':'3C66C0C0C0663C00','D':'F86C6666666CF800',
+  'E':'FE6268786862FE00','F':'FE6268786860F000','G':'3C66C0C0CE663E00','H':'CCCCCCFCCCCCCC00',
+  'I':'7830303030307800','J':'1E0C0C0CCCCC7800','K':'E6666C786C66E600','L':'F06060606266FE00',
+  'M':'C6EEFEFED6C6C600','N':'C6E6F6DECEC6C600','O':'386CC6C6C66C3800','P':'FC66667C6060F000',
+  'Q':'78CCCCCCDC781C00','R':'FC66667C6C66E600','S':'78CCE0701CCC7800','T':'FCB43030303C7800',
+  'U':'CCCCCCCCCCCCFC00','V':'CCCCCCCCCC783000','W':'C6C6C6D6FEEEC600','X':'C66C38386CC6C600',
+  'Y':'CCCCCC7830307800','Z':'FEC68C183266FE00',
+  ' ':'0000000000000000','-':'000000FC00000000','.':'0000000000303000',
+  '!':'3078783030003000','/':'060C183060C08000',':':'0030300000303000',
+  '*':'00663CFF3C660000','+':'003030FC30300000','?':'78CC0C1830003000',
+  ',':'0000000000303060',"'":'3030300000000000'
+};
+const glyphCache = {};
+function glyph(chr, col) {
+  const key = chr + col;
+  if (glyphCache[key]) return glyphCache[key];
+  const hex = FONT[chr] || FONT['?'];
+  const c = document.createElement('canvas');
+  c.width = 8; c.height = 8;
+  const g = c.getContext('2d');
+  g.fillStyle = col;
+  for (let y = 0; y < 8; y++) {
+    const bits = parseInt(hex.substr(y * 2, 2), 16);
+    for (let x = 0; x < 8; x++) if (bits & (0x80 >> x)) g.fillRect(x, y, 1, 1);
+  }
+  glyphCache[key] = c;
+  return c;
+}
+const CHW = W / DW * 8;      /* one character: 8 MARIA pixels wide */
+const CHH = H / DH * 8;
+function text(str, x, y, col, align) {
+  str = String(str).toUpperCase();
+  let sx = x;
+  if (align === 'center') sx = x - str.length * CHW / 2;
+  if (align === 'right')  sx = x - str.length * CHW;
+  for (let i = 0; i < str.length; i++) ctx.drawImage(glyph(str[i], col), sx + i * CHW, y, CHW, CHH);
+}
+
+/* ---------------- multi-colour sprites (mode 160B allows twelve) ---------------- */
+function makeSprite(rows, map) {
+  const c = document.createElement('canvas');
+  c.width = 16; c.height = 16;
+  const g = c.getContext('2d');
+  for (let y = 0; y < rows.length; y++)
+    for (let x = 0; x < rows[y].length; x++) {
+      const ch = rows[y][x];
+      if (ch !== '.') { g.fillStyle = map[ch]; g.fillRect(x, y, 1, 1); }
+    }
+  return c;
+}
+
+const BEE_ROWS = [
+  "W..............W",
+  ".W............W.",
+  "..W..........W..",
+  "...W........W...",
+  "....W......W....",
+  ".....LLLLLL.....",
+  "....LBBBBBBL....",
+  "...LBWBBBBWBL...",
+  "...BBBBBBBBBB...",
+  "..LBBBBBBBBBBL..",
+  ".LBB.BBBBBB.BBL.",
+  "LBB...BBBB...BBL",
+  "DB....BBBB....BD",
+  "D.....D..D.....D",
+  "......D..D......",
+  "................"
+];
+const FLY_ROWS = [
+  "..A..A....A..A..",
+  "..A..A....A..A..",
+  "..OORRRRRRRROO..",
+  ".ORRRRRRRRRRRRO.",
+  "ORR.RRRRRRRR.RRO",
+  "OR.RRRRLLRRRR.RO",
+  "OR.RD.RLLR.DR.RO",
+  "ORRRD.RLLR.DRRRO",
+  "ORRRRRRLLRRRRRRO",
+  ".DRRR.RRRR.RRRD.",
+  "..DR...RR...RD..",
+  ".DD....RR....DD.",
+  "DD.....RR.....DD",
+  "D......RR......D",
+  "......D..D......",
+  "................"
+];
+const BOSS_ROWS = [
+  ".....L.LL.L.....",
+  "......LLLL......",
+  ".....LGGGGL.....",
+  "....GG.WW.GG....",
+  "...GGGGGGGGGG...",
+  "..LGGGGGGGGGGL..",
+  ".GG.GGGGGGGG.GG.",
+  "GGD..GGGGGG..DGG",
+  "G.D...GGGG...D.G",
+  "G.D....GG....D.G",
+  "G.D..........D.G",
+  "G.D..........D.G",
+  "G.D..........D.G",
+  "GDD..........DDG",
+  ".D............D.",
+  "................"
+];
+const BOSSHURT_ROWS = BOSS_ROWS;
+const FIGHTER_ROWS = [
+  ".......RR.......",
+  ".......RR.......",
+  "......WRRW......",
+  "......WRRW......",
+  "......WRRW......",
+  "..B...WRRW...B..",
+  "..B...WRRW...B..",
+  "..BB.WWRRWW.BB..",
+  ".BWW.WWRRWW.WWB.",
+  ".BWWWWWRRWWWWWB.",
+  "BWWWWWWRRWWWWWWB",
+  "BWWWWWWWWWWWWWWB",
+  "BB..WWWWWWWW..BB",
+  "B....WW..WW....B",
+  ".....GG..GG.....",
+  "................"
+];
+const SCORPION_ROWS = [
+  "Y..............Y",
+  ".Y....YYYY....Y.",
+  "..Y..YCCCCY..Y..",
+  "..YYYC.CC.CYYY..",
+  ".YCCCCCCCCCCCCY.",
+  "YCC.CCCCCCCC.CCY",
+  "YC...CCCCCC...CY",
+  "Y.....CCCC.....Y",
+  "......CCCC......",
+  ".....CCCCCC.....",
+  "....CC.CC.CC....",
+  "...CC..CC..CC...",
+  "..CC...CC...CC..",
+  ".YY....CC....YY.",
+  "YY.....CC.....YY",
+  "................"
+];
+const SPY_ROWS = [
+  "......TTTT......",
+  ".....TGGGGT.....",
+  "....TG.GG.GT....",
+  "...TGGGGGGGGT...",
+  "..GGGGGGGGGGGG..",
+  ".GG.GGGGGGGG.GG.",
+  "GG..GGGGGGGG..GG",
+  "G...GGGGGGGG...G",
+  "....GGGGGGGG....",
+  "...GG.GGGG.GG...",
+  "..GG...GG...GG..",
+  ".TG....GG....GT.",
+  "TT.....GG.....TT",
+  "T......GG......T",
+  "......TTTT......",
+  "................"
+];
+const FLAGSHIP_ROWS = [
+  "......YYYY......",
+  ".....Y.AA.Y.....",
+  "....YAAAAAAY....",
+  "...YA.AAAA.AY...",
+  "..YAAAAAAAAAAY..",
+  ".YAAAAAAAAAAAAY.",
+  "YAAA.AAAAAA.AAAY",
+  "YAA...AAAA...AAY",
+  "YA.....AA.....AY",
+  "YAA...AAAA...AAY",
+  "YAAA.AAAAAA.AAAY",
+  ".YAAAAAAAAAAAAY.",
+  "..YAAAAAAAAAAY..",
+  "...YA.AAAA.AY...",
+  "....YYY..YYY....",
+  "................"
+];
+
+const SPR = {
+  bee:      makeSprite(BEE_ROWS,      { B:P.BLUE, L:P.BLUE_L, D:P.BLUE_D, W:P.BLUE_P }),
+  fly:      makeSprite(FLY_ROWS,      { R:P.RED, O:P.ORANGE, D:P.RED_D, L:P.AMBER, A:P.GOLD }),
+  boss:     makeSprite(BOSS_ROWS,     { G:P.GRN, L:P.GRN_L, D:P.GRN_D, W:P.WHITE }),
+  bossHurt: makeSprite(BOSSHURT_ROWS, { G:P.MAG, L:P.MAG_L, D:P.MAG_D, W:P.WHITE }),
+  fighter:  makeSprite(FIGHTER_ROWS,  { W:P.WHITE, R:P.RED, B:P.BLUE_L, G:P.AMBER }),
+  captured: makeSprite(FIGHTER_ROWS,  { W:P.RED_L, R:P.AMBER, B:P.RED_D, G:P.AMBER }),
+  scorpion: makeSprite(SCORPION_ROWS, { C:P.CYAN, Y:P.TEAL }),
+  spy:      makeSprite(SPY_ROWS,      { G:P.GRN_L, T:P.GRN_D }),
+  flagship: makeSprite(FLAGSHIP_ROWS, { A:P.AMBER, Y:P.GOLD })
+};
+
+/* a sprite is 16 MARIA pixels: wide pixels make it 36 x 32 game units */
+const SPW = W / DW * 16, SPH = H / DH * 16;
+
+/* ---------------- helpers ---------------- */
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+function bez(p0, p1, p2, p3, t) {
+  const u = 1 - t;
+  return {
+    x: u*u*u*p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t*t*t*p3.x,
+    y: u*u*u*p0.y + 3*u*u*t*p1.y + 3*u*t*t*p2.y + t*t*t*p3.y
+  };
+}
+/* everything lands on whole MARIA pixels */
+const snapX = v => Math.round(v / (W / DW)) * (W / DW);
+const snapY = v => Math.round(v / (H / DH)) * (H / DH);
+const PXW = W / DW, PXH = H / DH;
+
+/* ---------------- starfield ---------------- */
+const STAR_COLS = [P.WHITE, P.CYAN, P.AMBER, P.GRN_L, P.RED_L, P.BLUE_L];
+const stars = [];
+for (let i = 0; i < 56; i++)
+  stars.push({ x: snapX(rnd(0, W)), y: rnd(0, H), s: rnd(0.5, 1.7),
+               c: STAR_COLS[i % STAR_COLS.length], tw: rnd(0, 6.28) });
+function drawStars(dt, speed) {
+  for (const s of stars) {
+    s.y += s.s * speed * dt * 60;
+    if (s.y > H) { s.y = -2; s.x = snapX(rnd(0, W)); }
+    s.tw += dt * 4;
+    if (Math.sin(s.tw) > -0.4) {
+      ctx.fillStyle = s.c;
+      ctx.fillRect(s.x, snapY(s.y), PXW, PXH);
+    }
+  }
+}
+
+/* ---------------- scoring, from the arcade table ---------------- */
+const SCORE = {
+  beeForm: 50, beeDive: 100, flyForm: 80, flyDive: 160,
+  bossForm: 150, bossDive: 400, bossEsc1: 800, bossEsc2: 1600,
+  captured: 1000, transform: 160
+};
+const TRANSFORM_ALL = [1000, 2000, 3000];
+const CHAL_GROUP    = [1000, 1000, 1500, 1500, 2000, 2000, 3000];
+
+/* ---------------- game state ---------------- */
+const game = {
+  state: 'title', stage: 1, score: 0, hi: 20000, lives: 3,
+  timer: 0, msg: '', msg2: '', msgTimer: 0,
+  challenge: false, chHits: 0, chGroups: 0, chIndex: 0,
+  extraAt: 20000, formCount: 40
+};
+let startRequested = false;
+
+const player = {
+  x: W / 2, targetX: W / 2, y: H - 96,
+  alive: true, dual: false, cooldown: 0, invuln: 0,
+  captured: false, capPhase: 0
+};
+
+let enemies = [], pShots = [], eShots = [], parts = [], floats = [];
+let formT = 0, diveTimer = 3, beamTimer = 12, entryTick = 0;
+let transformDone = false, rescueFx = null;
+const keys = {};
+
+function slotPos(col, row) {
+  const sway = Math.sin(formT) * 20;
+  const breathe = 1 + 0.04 * Math.sin(formT * 0.9);
+  return { x: W / 2 + sway + (col - 4.5) * 34 * breathe, y: 140 + row * 34 };
+}
+
+function makeEnemy(kind, col, row, path, delay) {
+  return {
+    kind, col, row, hp: kind === 'boss' ? 2 : 1,
+    state: 'queued', path, t: 0, delay,
+    x: path ? path[0].x : 0, y: path ? path[0].y : 0,
+    speed: 0.55, divePath: null, fired: 0, bombs: 0,
+    hasCaptive: false, capturing: false, beamT: 0, beamSnd: false,
+    escorts: 0, challenge: false, group: 0
+  };
+}
+function entryPath(kind) {
+  const o = 48;
+  if (kind === 0) return [{x:-o,y:H*0.52},  {x:W*0.6,y:H*0.86}, {x:W*1.05,y:H*0.3},  {x:W*0.5,y:H*0.2}];
+  if (kind === 1) return [{x:W+o,y:H*0.52}, {x:W*0.4,y:H*0.86}, {x:-W*0.05,y:H*0.3}, {x:W*0.5,y:H*0.2}];
+  if (kind === 2) return [{x:W*0.28,y:-o},  {x:-W*0.15,y:H*0.6},{x:W*0.6,y:H*0.72},  {x:W*0.5,y:H*0.22}];
+  return                 [{x:W*0.72,y:-o},  {x:W*1.15,y:H*0.6}, {x:W*0.4,y:H*0.72},  {x:W*0.5,y:H*0.22}];
+}
+
+/* ---------------- stages ---------------- */
+const isChallenge = n => n % 4 === 3;
+
+function buildStage(n) {
+  enemies = []; pShots = []; eShots = []; entryTick = 0;
+  transformDone = false;
+  const rows = [
+    { kind:'boss', cols:[3,4,5,6],             row:0 },
+    { kind:'fly',  cols:[1,2,3,4,5,6,7,8],     row:1 },
+    { kind:'fly',  cols:[1,2,3,4,5,6,7,8],     row:2 },
+    { kind:'bee',  cols:[0,1,2,3,4,5,6,7,8,9], row:3 },
+    { kind:'bee',  cols:[0,1,2,3,4,5,6,7,8,9], row:4 }
+  ];
+  const carry = clamp((n - 1) * 0.11, 0, 0.85);
+  const load  = n < 6 ? 1 : (n < 10 ? 2 : 3);
+  let i = 0, squad = 0;
+  for (const r of rows) {
+    for (const c of r.cols) {
+      const e = makeEnemy(r.kind, c, r.row, entryPath(squad % 4),
+                          (i % 8) * 0.16 + Math.floor(i / 8) * 1.4);
+      e.speed = 0.5 + n * 0.02;
+      e.bombs = (n >= 2 && Math.random() < carry) ? load : 0;
+      enemies.push(e);
+      if (++i % 8 === 0) squad++;
+    }
+  }
+  game.formCount = enemies.length;
+  diveTimer = Math.max(1.1, 3.2 - n * 0.14);
+  beamTimer = rnd(8, 14);
+}
+function challengePath(k) {
+  const A = [
+    [{x:-40,y:H*0.18},  {x:W*0.55,y:-70},    {x:W*0.45,y:H*0.8},  {x:W+40,y:H*0.3}],
+    [{x:W+40,y:H*0.18}, {x:W*0.45,y:-70},    {x:W*0.55,y:H*0.8},  {x:-40,y:H*0.3}],
+    [{x:W*0.5,y:-50},   {x:-W*0.3,y:H*0.45}, {x:W*1.3,y:H*0.6},   {x:W*0.5,y:H+50}],
+    [{x:-40,y:-40},     {x:W*1.2,y:H*0.34},  {x:-W*0.2,y:H*0.64}, {x:W+40,y:H*0.9}],
+    [{x:W+40,y:-40},    {x:-W*0.2,y:H*0.34}, {x:W*1.2,y:H*0.64},  {x:-40,y:H*0.9}]
+  ];
+  return A[k % A.length];
+}
+function buildChallenge(n) {
+  enemies = []; pShots = []; eShots = []; entryTick = 0;
+  game.chHits = 0; game.chGroups = 0;
+  game.chIndex = Math.floor(n / 4);
+  const pool = ['bee', 'fly', 'scorpion', 'spy', 'flagship'];
+  const kind = pool[game.chIndex % pool.length];
+  for (let w = 0; w < 5; w++) {
+    const path = challengePath(w);
+    for (let k = 0; k < 8; k++) {
+      const e = makeEnemy((w === 4 && k >= 4) ? 'boss' : kind, 0, 0, path, w * 2.2 + k * 0.18);
+      e.speed = 0.40 + n * 0.01;
+      e.challenge = true; e.group = w; e.hp = 1;
+      enemies.push(e);
+    }
+  }
+  game.formCount = 40;
+  diveTimer = 1e9; beamTimer = 1e9;
+}
+function beginStage(n) {
+  game.challenge = isChallenge(n);
+  player.invuln = Math.max(player.invuln, 1.2);
+  if (game.challenge) {
+    buildChallenge(n);
+    game.state = 'play';
+    game.msg = 'CHALLENGING'; game.msg2 = 'STAGE'; game.msgTimer = 2.6;
+    sfx.chal();
+  } else {
+    buildStage(n);
+    game.state = 'entering';
+    game.msg = 'STAGE ' + n; game.msg2 = ''; game.msgTimer = 2;
+    sfx.stage();
+  }
+}
+
+/* ---------------- combat ---------------- */
+function fire() {
+  const cap = player.dual ? 4 : 2;
+  if (pShots.length >= cap || player.cooldown > 0 || !player.alive || player.captured) return;
+  player.cooldown = 0.14;
+  sfx.fire();
+  if (player.dual) {
+    pShots.push({ x: player.x - 18, y: player.y - 16 });
+    pShots.push({ x: player.x + 18, y: player.y - 16 });
+  } else pShots.push({ x: player.x, y: player.y - 16 });
+}
+function enemyFire(e) {
+  if (eShots.length > 10 || !player.alive) return;
+  const dx = (player.x - e.x) / 70;
+  eShots.push({ x: e.x, y: e.y + 10, vx: clamp(dx + rnd(-0.5, 0.5), -2.2, 2.2),
+                vy: rnd(3.0, 4.0) + game.stage * 0.08 });
+}
+function enemyBomb(e) {
+  if (eShots.length > 14 || !player.alive) return;
+  eShots.push({ x: e.x, y: e.y + 10, vx: rnd(-0.6, 0.6),
+                vy: rnd(1.2, 1.8) + game.stage * 0.08, bomb: true });
+}
+function explode(x, y, col, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rnd(0, 6.28), sp = rnd(40, 170);
+    parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: rnd(0.25, 0.6), col });
+  }
+}
+function addScore(v, x, y) {
+  game.score += v;
+  if (game.score > game.hi) game.hi = game.score;
+  if (game.score >= game.extraAt) { game.extraAt += 70000; game.lives++; sfx.extra(); }
+  if (x !== undefined) floats.push({ x, y, v: String(v), life: 0.85 });
+}
+const enemyColour = k =>
+  k === 'boss' ? P.GRN : k === 'fly' ? P.RED_L : k === 'bee' ? P.BLUE_L :
+  k === 'scorpion' ? P.CYAN : k === 'spy' ? P.GRN_L : P.AMBER;
+
+function killEnemy(e, idx) {
+  const diving = e.state === 'dive' || e.state === 'beam' || e.state === 'return';
+  if (e.challenge) {
+    game.chHits++;
+    addScore(100, e.x, e.y);
+    explode(e.x, e.y, enemyColour(e.kind), 10);
+    if (e.kind === 'fly') sfx.hitFly(); else sfx.hitBee();
+    const grp = e.group;
+    enemies.splice(idx, 1);
+    if (!enemies.some(o => o.challenge && o.group === grp)) {
+      game.chGroups++;
+      addScore(CHAL_GROUP[Math.min(game.chIndex, CHAL_GROUP.length - 1)], W / 2, H * 0.42);
+      sfx.bonus();
+    }
+    return;
+  }
+  if (e.kind === 'scorpion' || e.kind === 'spy' || e.kind === 'flagship') {
+    addScore(SCORE.transform, e.x, e.y);
+    explode(e.x, e.y, enemyColour(e.kind), 12);
+    sfx.hitBee();
+    const kind = e.kind;
+    enemies.splice(idx, 1);
+    if (!enemies.some(o => o.kind === kind)) {
+      addScore(TRANSFORM_ALL[kind === 'scorpion' ? 0 : kind === 'spy' ? 1 : 2], W / 2, H * 0.42);
+      sfx.bonus();
+    }
+    return;
+  }
+  let base;
+  if (e.kind === 'boss')
+    base = diving ? (e.escorts >= 2 ? SCORE.bossEsc2 : e.escorts === 1 ? SCORE.bossEsc1 : SCORE.bossDive)
+                  : SCORE.bossForm;
+  else if (e.kind === 'fly') base = diving ? SCORE.flyDive : SCORE.flyForm;
+  else base = diving ? SCORE.beeDive : SCORE.beeForm;
+  addScore(base, e.x, e.y);
+  explode(e.x, e.y, enemyColour(e.kind), e.kind === 'boss' ? 16 : 12);
+  if (e.kind === 'boss') sfx.hitBoss();
+  else if (e.kind === 'fly') sfx.hitFly();
+  else sfx.hitBee();
+  if (e.hasCaptive) {
+    if (diving) {
+      rescueFx = { x: e.x, y: e.y, t: 0 };
+      sfx.rescue();
+      for (const o of enemies) if (o.state === 'dive') o.state = 'return';
+    } else floats.push({ x: e.x, y: e.y, v: 'SHIP LOST', life: 1.3 });
+  }
+  enemies.splice(idx, 1);
+}
+
+function startDive(e, escorts) {
+  e.state = 'dive'; e.t = 0; e.fired = 0; e.escorts = escorts || 0;
+  const side = e.x < W / 2 ? 1 : -1;
+  e.divePath = [
+    { x: e.x, y: e.y },
+    { x: e.x + side * rnd(70, 130), y: e.y + rnd(70, 120) },
+    { x: clamp(player.x + rnd(-100, 100), 24, W - 24), y: H * rnd(0.55, 0.7) },
+    { x: clamp(player.x + rnd(-50, 50), 24, W - 24), y: H + 60 }
+  ];
+  sfx.dive();
+}
+function startBeam(e) {
+  e.state = 'beam'; e.t = 0; e.beamT = 0; e.beamSnd = false;
+  const bx = clamp(player.x + rnd(-50, 50), 64, W - 64);
+  e.divePath = [{x:e.x,y:e.y}, {x:e.x + (e.x < W/2 ? 90 : -90), y:e.y + 130},
+                {x:bx, y:H*0.34}, {x:bx, y:H*0.42}];
+  sfx.dive();
+}
+function capturePlayer(e) {
+  player.captured = true; player.capPhase = 0;
+  e.hasCaptive = true; e.capturing = true;
+  sfx.capture();
+  game.state = 'playerdown'; game.timer = 3.6;
+  game.msg = 'FIGHTER'; game.msg2 = 'CAPTURED'; game.msgTimer = 3;
+}
+function playerHit() {
+  if (player.dual) {
+    player.dual = false;
+    explode(player.x + 18, player.y, P.WHITE, 12);
+    sfx.die(); player.invuln = 2;
+    return;
+  }
+  player.alive = false;
+  explode(player.x, player.y, P.WHITE, 18);
+  explode(player.x, player.y, P.AMBER, 12);
+  sfx.die();
+  game.state = 'playerdown'; game.timer = 2.2;
+}
+
+/* ---------------- input ---------------- */
+const input = { touching: false, lastX: 0 };
+const px2game = e => {
+  const r = canvas.getBoundingClientRect();
+  return ((e.clientX - r.left) / r.width) * W;
+};
+canvas.addEventListener('pointerdown', e => {
+  audio();
+  input.touching = true; input.lastX = px2game(e);
+  if (game.state === 'title' || game.state === 'gameover') { startRequested = true; sfx.coin(); }
+  e.preventDefault();
+});
+canvas.addEventListener('pointermove', e => {
+  if (!input.touching) return;
+  const x = px2game(e);
+  player.targetX += (x - input.lastX) * 1.25;
+  input.lastX = x;
+  e.preventDefault();
+});
+addEventListener('pointerup', () => { input.touching = false; });
+addEventListener('pointercancel', () => { input.touching = false; });
+addEventListener('keydown', e => {
+  audio();
+  keys[e.code] = true;
+  if ((e.code === 'Enter' || e.code === 'Space') &&
+      (game.state === 'title' || game.state === 'gameover')) { startRequested = true; sfx.coin(); }
+  if (['ArrowLeft','ArrowRight','ArrowUp','Space'].includes(e.code)) e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+/* ---------------- update ---------------- */
+function update(dt) {
+  formT += dt;
+  if (game.msgTimer > 0) game.msgTimer -= dt;
+
+  if (game.state === 'title' || game.state === 'gameover') {
+    if (startRequested) {
+      startRequested = false;
+      game.score = 0; game.lives = 3; game.stage = 1; game.extraAt = 20000;
+      player.dual = false; player.alive = true; player.captured = false;
+      player.x = player.targetX = W / 2; player.y = H - 96; player.invuln = 2;
+      rescueFx = null; parts = []; floats = [];
+      beginStage(1);
+    }
+    return;
+  }
+  if (game.state === 'stageclear') {
+    game.timer -= dt;
+    if (game.timer <= 0) { game.stage++; beginStage(game.stage); }
+  }
+  if (game.state === 'playerdown') {
+    game.timer -= dt;
+    if (player.captured && player.capPhase === 0) {
+      const cap = enemies.find(e => e.capturing);
+      if (cap) {
+        player.y -= dt * 95;
+        player.x += (cap.x - player.x) * dt * 3;
+        if (player.y < cap.y + 34) { player.capPhase = 1; cap.capturing = false; }
+      } else player.capPhase = 1;
+    }
+    if (game.timer <= 0) {
+      if (game.lives > 0) {
+        game.lives--;
+        player.alive = true; player.captured = false; player.dual = false;
+        player.x = player.targetX = W / 2; player.y = H - 96; player.invuln = 2.5;
+        game.state = 'play';
+      } else { game.state = 'gameover'; game.msg = ''; game.msg2 = ''; }
+    }
+  }
+
+  const playing = game.state === 'play' || game.state === 'entering';
+
+  if (player.alive && !player.captured && (playing || game.state === 'stageclear')) {
+    if (keys['ArrowLeft']  || keys['KeyA']) player.targetX -= 260 * dt;
+    if (keys['ArrowRight'] || keys['KeyD']) player.targetX += 260 * dt;
+    player.targetX = clamp(player.targetX, 20, W - 20);
+    player.x += (player.targetX - player.x) * Math.min(1, dt * 18);
+    player.cooldown -= dt;
+    if (player.invuln > 0) player.invuln -= dt;
+    if (input.touching || keys['Space'] || keys['ArrowUp']) fire();
+  }
+
+  if (rescueFx) {
+    rescueFx.t += dt;
+    rescueFx.x += (player.x - rescueFx.x) * dt * 4;
+    rescueFx.y += (player.y - rescueFx.y) * dt * 4;
+    if (rescueFx.t > 1.4 ||
+        (Math.abs(rescueFx.x - player.x) < 10 && Math.abs(rescueFx.y - player.y) < 10)) {
+      rescueFx = null; player.dual = true;
+      addScore(SCORE.captured, player.x, player.y - 30);
+      game.msg = 'DUAL'; game.msg2 = 'FIGHTER'; game.msgTimer = 2;
+    }
+  }
+
+  entryTick += dt;
+  let anyEntering = false;
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (e.state === 'queued') {
+      anyEntering = true;
+      if (entryTick > e.delay) { e.state = 'entering'; e.t = 0; }
+      continue;
+    }
+    if (e.state === 'entering') {
+      anyEntering = true;
+      e.t += dt * e.speed;
+      if (e.t >= 1) {
+        if (e.challenge) { enemies.splice(i, 1); continue; }
+        e.state = 'settle';
+      } else {
+        const p = bez(e.path[0], e.path[1], e.path[2], e.path[3], e.t);
+        e.x = p.x; e.y = p.y;
+        if (e.bombs > 0 && e.t > 0.22 && e.t < 0.88 &&
+            Math.random() < dt * (0.35 + game.stage * 0.09)) { e.bombs--; enemyBomb(e); }
+      }
+      continue;
+    }
+    if (e.state === 'settle') {
+      anyEntering = true;
+      const s = slotPos(e.col, e.row);
+      e.x += (s.x - e.x) * Math.min(1, dt * 6);
+      e.y += (s.y - e.y) * Math.min(1, dt * 6);
+      if (Math.abs(e.x - s.x) < 3 && Math.abs(e.y - s.y) < 3) e.state = 'form';
+      continue;
+    }
+    if (e.state === 'form') {
+      const s = slotPos(e.col, e.row);
+      e.x = s.x; e.y = s.y;
+      continue;
+    }
+    if (e.state === 'dive' && playing) {
+      e.t += dt * (0.42 + game.stage * 0.02);
+      if (e.t >= 1) { e.state = 'return'; e.x = e.divePath[3].x; e.y = -34; }
+      else {
+        const p = bez(e.divePath[0], e.divePath[1], e.divePath[2], e.divePath[3], e.t);
+        e.x = p.x; e.y = p.y;
+        if (e.fired < 2 && e.t > 0.3 + e.fired * 0.25) { e.fired++; enemyFire(e); }
+      }
+      continue;
+    }
+    if (e.state === 'trans' && playing) {
+      e.t += dt * 0.38;
+      if (e.t >= 1) { enemies.splice(i, 1); continue; }
+      if (e.t > 0) {
+        const p = bez(e.divePath[0], e.divePath[1], e.divePath[2], e.divePath[3], e.t);
+        e.x = p.x; e.y = p.y;
+      }
+      if (e.fired < 2 && e.t > 0.25 + e.fired * 0.3) { e.fired++; enemyFire(e); }
+      continue;
+    }
+    if (e.state === 'beam' && playing) {
+      if (e.t < 1) {
+        e.t += dt * 0.5;
+        const p = bez(e.divePath[0], e.divePath[1], e.divePath[2], e.divePath[3], Math.min(1, e.t));
+        e.x = p.x; e.y = p.y;
+      } else {
+        e.beamT += dt;
+        if (!e.beamSnd && e.beamT > 0.15) { e.beamSnd = true; sfx.beam(); }
+        if (e.beamT > 0.45 && e.beamT < 2.6 && player.alive && !player.captured &&
+            player.invuln <= 0 && game.state === 'play') {
+          const half = 14 + 34 * ((e.beamT - 0.45) / 2.15);
+          if (Math.abs(player.x - e.x) < half && player.y > e.y) capturePlayer(e);
+        }
+        if (e.beamT > 3) { e.state = 'return'; e.beamSnd = false; }
+      }
+      continue;
+    }
+    if (e.state === 'return') {
+      const s = slotPos(e.col, e.row);
+      const dx = s.x - e.x, dy = s.y - e.y, d = Math.hypot(dx, dy), sp = 190 * dt;
+      if (d < sp || d < 4) e.state = 'form';
+      else { e.x += dx / d * sp; e.y += dy / d * sp; }
+    }
+  }
+  if (game.state === 'entering' && !anyEntering) game.state = 'play';
+
+  if (game.state === 'play' && !game.challenge) {
+    diveTimer -= dt; beamTimer -= dt;
+    if (diveTimer <= 0) {
+      const formed = enemies.filter(e => e.state === 'form');
+      const bosses = formed.filter(e => e.kind === 'boss');
+      if (bosses.length && Math.random() < 0.4) {
+        const b = bosses[Math.floor(Math.random() * bosses.length)];
+        const wings = formed.filter(e => e.kind === 'fly' && e.row === 1);
+        const n = Math.min(wings.length, Math.floor(rnd(0, 3)));
+        startDive(b, n);
+        for (let k = 0; k < n; k++) {
+          const w = wings.splice(Math.floor(Math.random() * wings.length), 1)[0];
+          if (w) startDive(w, 0);
+        }
+      } else if (formed.length) {
+        const n = Math.min(formed.length, 1 + Math.floor(Math.random() * Math.min(3, 1 + game.stage / 2)));
+        for (let k = 0; k < n; k++) {
+          const pick = formed.splice(Math.floor(Math.random() * formed.length), 1)[0];
+          if (pick) startDive(pick, 0);
+        }
+      }
+      diveTimer = Math.max(0.85, rnd(1.5, 2.9) - game.stage * 0.11);
+    }
+    if (beamTimer <= 0) {
+      const b = enemies.filter(e => e.kind === 'boss' && e.state === 'form' && !e.hasCaptive);
+      if (b.length && !player.dual && Math.random() < 0.8)
+        startBeam(b[Math.floor(Math.random() * b.length)]);
+      beamTimer = rnd(9, 15);
+    }
+    if (!transformDone && game.stage >= 4 && enemies.length < game.formCount * 0.75) {
+      const host = enemies.find(e => e.state === 'form' && e.kind === 'bee') ||
+                   enemies.find(e => e.state === 'form' && e.kind === 'fly');
+      if (host) {
+        transformDone = true;
+        const kind = ['scorpion', 'spy', 'flagship'][Math.floor((game.stage - 4) / 4) % 3];
+        const hx = host.x, hy = host.y;
+        enemies.splice(enemies.indexOf(host), 1);
+        explode(hx, hy, P.WHITE, 10);
+        for (let k = 0; k < 3; k++) {
+          const t = makeEnemy(kind, 0, 0, null, 0);
+          t.state = 'trans'; t.t = -k * 0.09; t.x = hx; t.y = hy;
+          t.divePath = [
+            { x: hx, y: hy },
+            { x: hx + (k - 1) * 90, y: hy + 190 },
+            { x: clamp(player.x + (k - 1) * 70, 30, W - 30), y: H * 0.72 },
+            { x: k * (W / 2), y: -50 }
+          ];
+          enemies.push(t);
+        }
+        sfx.dive();
+      }
+    }
+    if (enemies.length === 0) {
+      game.state = 'stageclear';
+      game.timer = 2; game.msg = 'STAGE CLEAR'; game.msg2 = ''; game.msgTimer = 2;
+    }
+  }
+  if (game.state === 'play' && game.challenge && enemies.length === 0) {
+    game.state = 'stageclear';
+    const perfect = game.chHits >= 40;
+    if (perfect) { addScore(10000, W / 2, H * 0.46); sfx.perfect(); }
+    game.timer = 3.6;
+    game.msg = perfect ? 'PERFECT' : 'HITS ' + game.chHits + '/40';
+    game.msg2 = perfect ? 'BONUS 10000' : '';
+    game.msgTimer = 3.6;
+  }
+
+  for (let i = pShots.length - 1; i >= 0; i--) {
+    const s = pShots[i];
+    s.y -= 620 * dt;
+    if (s.y < -14) { pShots.splice(i, 1); continue; }
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if (e.state === 'queued') continue;
+      if (Math.abs(s.x - e.x) < 16 && Math.abs(s.y - e.y) < 15) {
+        pShots.splice(i, 1);
+        if (--e.hp <= 0) killEnemy(e, j);
+        else { sfx.bossHurt(); explode(e.x, e.y, P.MAG_L, 5); }
+        break;
+      }
+    }
+  }
+  for (let i = eShots.length - 1; i >= 0; i--) {
+    const s = eShots[i];
+    if (s.bomb) s.vy += 2.4 * dt;
+    s.x += s.vx * 60 * dt; s.y += s.vy * 60 * dt;
+    if (s.y > H + 12 || s.x < -12 || s.x > W + 12) { eShots.splice(i, 1); continue; }
+    if (player.alive && !player.captured && player.invuln <= 0 && !game.challenge && playing &&
+        Math.abs(s.x - player.x) < 13 && Math.abs(s.y - player.y) < 12) {
+      eShots.splice(i, 1); playerHit();
+    }
+  }
+  if (player.alive && !player.captured && player.invuln <= 0 && !game.challenge && playing) {
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if ((e.state === 'dive' || e.state === 'entering' || e.state === 'trans') &&
+          Math.abs(e.x - player.x) < 18 && Math.abs(e.y - player.y) < 17) {
+        killEnemy(e, j); playerHit(); break;
+      }
+    }
+  }
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= (1 - dt * 2); p.vy *= (1 - dt * 2);
+    p.life -= dt;
+    if (p.life <= 0) parts.splice(i, 1);
+  }
+  for (let i = floats.length - 1; i >= 0; i--) {
+    floats[i].y -= 26 * dt; floats[i].life -= dt;
+    if (floats[i].life <= 0) floats.splice(i, 1);
+  }
+  throb(dt, game.formCount ? enemies.length / game.formCount : 1);
+}
+
+/* ---------------- drawing ---------------- */
+function blit(img, x, y, flip) {
+  const dx = snapX(x - SPW / 2), dy = snapY(y - SPH / 2);
+  if (flip) {
+    ctx.save();
+    ctx.translate(dx + SPW / 2, dy + SPH / 2);
+    ctx.rotate(Math.PI);
+    ctx.drawImage(img, -SPW / 2, -SPH / 2, SPW, SPH);
+    ctx.restore();
+  } else ctx.drawImage(img, dx, dy, SPW, SPH);
+}
+function spriteFor(e) {
+  if (e.kind === 'boss') return e.hp <= 1 ? SPR.bossHurt : SPR.boss;
+  if (e.kind === 'fly') return SPR.fly;
+  if (e.kind === 'bee') return SPR.bee;
+  if (e.kind === 'scorpion') return SPR.scorpion;
+  if (e.kind === 'spy') return SPR.spy;
+  return SPR.flagship;
+}
+function stageBadges(n) {
+  const tiers = [[50, P.WHITE], [30, P.CYAN], [20, P.GRN], [10, P.AMBER], [5, P.RED_L], [1, P.BLUE_L]];
+  const b = [];
+  let left = n;
+  for (const t of tiers) while (left >= t[0]) { b.push(t[1]); left -= t[0]; }
+  return b.slice(0, 12);
+}
+const playingState = () =>
+  game.state === 'play' || game.state === 'entering' || game.state === 'stageclear';
+
+function draw(dt) {
+  ctx.fillStyle = P.BLACK;
+  ctx.fillRect(0, 0, W, H);
+  drawStars(dt, game.state === 'stageclear' ? 3.5 : 1.1);
+
+  /* tractor beam: MARIA can hold plenty of colours, so it fans in bands */
+  for (const e of enemies) {
+    if (e.state !== 'beam' || e.t < 1 || e.beamT < 0.15 || e.beamT > 2.95) continue;
+    const grow = clamp((e.beamT - 0.15) / 0.5, 0, 1);
+    const half = 52 * grow;
+    const cols = [P.BLUE_L, P.CYAN, P.WHITE, P.BLUE];
+    for (let k = 0; k < 8; k++) {
+      const f = ((e.beamT * 1.6 + k / 8) % 1);
+      const y = e.y + 16 + f * (H - 70 - e.y);
+      const w2 = half * f;
+      ctx.fillStyle = cols[k % cols.length];
+      ctx.fillRect(snapX(e.x - w2), snapY(y), Math.max(PXW, snapX(w2 * 2)), PXH * 2);
+    }
+  }
+
+  for (const e of enemies) {
+    if (e.state === 'queued') continue;
+    const flying = e.state === 'entering' || e.state === 'dive' || e.state === 'trans';
+    blit(spriteFor(e), e.x, e.y, flying);
+    if (e.hasCaptive) blit(SPR.captured, e.x, e.y - 32, true);
+  }
+  if (rescueFx) blit(SPR.captured, rescueFx.x, rescueFx.y, false);
+
+  for (const s of pShots) {
+    ctx.fillStyle = P.WHITE;
+    ctx.fillRect(snapX(s.x) - PXW, snapY(s.y), PXW * 2, PXH * 6);
+    ctx.fillStyle = P.CYAN;
+    ctx.fillRect(snapX(s.x) - PXW, snapY(s.y), PXW * 2, PXH * 2);
+  }
+  for (const s of eShots) {
+    ctx.fillStyle = s.bomb ? P.AMBER : P.RED_L;
+    ctx.fillRect(snapX(s.x) - PXW, snapY(s.y), PXW * 2, PXH * (s.bomb ? 4 : 5));
+    ctx.fillStyle = s.bomb ? P.GOLD : P.WHITE;
+    ctx.fillRect(snapX(s.x) - PXW, snapY(s.y), PXW * 2, PXH);
+  }
+
+  if (player.alive && (playingState() || (game.state === 'playerdown' && player.captured))) {
+    const blink = player.invuln > 0 && Math.floor(player.invuln * 12) % 2 === 0;
+    if (!blink) {
+      if (player.captured) { if (player.capPhase === 0) blit(SPR.captured, player.x, player.y, false); }
+      else if (player.dual) { blit(SPR.fighter, player.x - 18, player.y, false); blit(SPR.fighter, player.x + 18, player.y, false); }
+      else blit(SPR.fighter, player.x, player.y, false);
+    }
+  }
+
+  for (const p of parts) {
+    if (p.life < 0.12 && Math.floor(p.life * 40) % 2) continue;
+    ctx.fillStyle = p.col;
+    ctx.fillRect(snapX(p.x), snapY(p.y), PXW * 2, PXH * 2);
+  }
+  for (const f of floats) {
+    if (f.life < 0.3 && Math.floor(f.life * 20) % 2) continue;
+    text(f.v, f.x, f.y, P.AMBER, 'center');
+  }
+
+  /* ---------------- HUD ---------------- */
+  text('1UP', 10, 6, P.RED_L);
+  text('HIGH SCORE', W - 10, 6, P.RED_L, 'right');
+  text(String(game.score).padStart(6, '0'), 10, 24, P.WHITE);
+  text(String(game.hi).padStart(6, '0'), W - 10, 24, P.WHITE, 'right');
+  if (game.challenge && game.state === 'play')
+    text('HITS ' + game.chHits, W / 2, 24, P.AMBER, 'center');
+
+  for (let i = 0; i < Math.min(game.lives, 5); i++)
+    ctx.drawImage(SPR.fighter, 8 + i * 22, H - 26, SPW * 0.72, SPH * 0.72);
+
+  const badges = stageBadges(game.stage);
+  for (let i = 0; i < badges.length; i++) {
+    const bx = snapX(W - 22 - i * 16), by = snapY(H - 24);
+    ctx.fillStyle = badges[i];
+    ctx.fillRect(bx, by, PXW * 5, PXH * 6);
+    ctx.fillStyle = P.BLACK;
+    ctx.fillRect(bx + PXW * 2, by + PXH, PXW, PXH * 4);
+  }
+
+  if (game.msgTimer > 0 && (game.msg || game.msg2)) {
+    if (game.msg)  text(game.msg,  W / 2, H * 0.40, P.CYAN, 'center');
+    if (game.msg2) text(game.msg2, W / 2, H * 0.45, P.CYAN, 'center');
+  }
+
+  if (game.state === 'title') {
+    text('NOVA', W / 2, H * 0.14, P.AMBER, 'center');
+    text('SQUADRON', W / 2, H * 0.20, P.AMBER, 'center');
+    text('7800 PROSYSTEM', W / 2, H * 0.27, P.GREY, 'center');
+
+    const legend = [[SPR.boss, '150 PTS', P.GRN_L], [SPR.fly, '80 PTS', P.RED_L], [SPR.bee, '50 PTS', P.BLUE_L]];
+    for (let i = 0; i < legend.length; i++) {
+      const y = H * 0.37 + i * H * 0.065;
+      ctx.drawImage(legend[i][0], snapX(70), snapY(y), SPW, SPH);
+      text(legend[i][1], 140, y + 6, legend[i][2]);
+    }
+    if (Math.floor(performance.now() / 500) % 2 === 0)
+      text('PRESS FIRE', W / 2, H * 0.62, P.WHITE, 'center');
+    text('DRAG TO MOVE', W / 2, H * 0.71, P.GREY, 'center');
+    text('HOLD TO FIRE', W / 2, H * 0.76, P.GREY, 'center');
+    text('BEWARE THE', W / 2, H * 0.85, P.CYAN, 'center');
+    text('TRACTOR BEAM', W / 2, H * 0.90, P.CYAN, 'center');
+  }
+  if (game.state === 'gameover') {
+    text('GAME OVER', W / 2, H * 0.40, P.RED_L, 'center');
+    text('SCORE ' + game.score, W / 2, H * 0.48, P.WHITE, 'center');
+    if (game.score >= game.hi && game.score > 0)
+      text('NEW RECORD', W / 2, H * 0.54, P.AMBER, 'center');
+    if (Math.floor(performance.now() / 500) % 2 === 0)
+      text('PRESS FIRE', W / 2, H * 0.62, P.WHITE, 'center');
+  }
+}
+
+/* ---------------- 60 Hz NTSC ---------------- */
+let last = performance.now(), acc = 0;
+const STEP = 1 / 60;
+function loop(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.25) dt = 0.25;
+  acc += dt;
+  while (acc >= STEP) { update(STEP); acc -= STEP; }
+  draw(STEP);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
