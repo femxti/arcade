@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>NOVA SQUADRON</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#000; overflow:hidden; touch-action:none; overscroll-behavior:none; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000; }
+  canvas { display:block; image-rendering:pixelated; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+"use strict";
+/* ============================================================
+   NOVA SQUADRON — a Galaga-style fixed shooter for mobile
+   Touch: drag anywhere to steer · hold to auto-fire
+   ============================================================ */
+
+const W = 360, H = 640;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function fit() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width  = (W * scale) + 'px';
+  canvas.style.height = (H * scale) + 'px';
+  canvas.width  = Math.floor(W * dpr);
+  canvas.height = Math.floor(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+}
+fit();
+addEventListener('resize', fit);
+
+/* ---------------- audio ---------------- */
+let AC = null;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || 'square';
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(AC.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+const sfx = {
+  shoot: () => beep(880, 0.09, 'square', 0.05, -600),
+  hit:   () => beep(220, 0.12, 'sawtooth', 0.08, -140),
+  boom:  () => { beep(120, 0.3, 'sawtooth', 0.1, -80); beep(60, 0.4, 'triangle', 0.1, -30); },
+  dive:  () => beep(1400, 0.25, 'square', 0.03, -900),
+  beam:  () => beep(300, 0.5, 'sine', 0.06, 500),
+  cap:   () => beep(900, 0.6, 'sine', 0.07, -700),
+  rescue:() => { beep(523, 0.12, 'square', 0.07); setTimeout(()=>beep(659,0.12,'square',0.07),110); setTimeout(()=>beep(784,0.2,'square',0.07),220); },
+  stage: () => { beep(659, 0.1, 'square', 0.06); setTimeout(()=>beep(880,0.15,'square',0.06),100); },
+  die:   () => { beep(400, 0.5, 'sawtooth', 0.1, -350); }
+};
+
+/* ---------------- helpers ---------------- */
+const rnd = (a,b) => a + Math.random() * (b - a);
+const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
+function bez(p0,p1,p2,p3,t){
+  const u = 1 - t;
+  return {
+    x: u*u*u*p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t*t*t*p3.x,
+    y: u*u*u*p0.y + 3*u*u*t*p1.y + 3*u*t*t*p2.y + t*t*t*p3.y
+  };
+}
+
+/* ---------------- starfield ---------------- */
+const stars = [];
+for (let i=0;i<90;i++) stars.push({ x:rnd(0,W), y:rnd(0,H), s:rnd(0.4,1.8), c:['#9db4ff','#ffffff','#ffd9a0','#a0ffd9'][i%4], tw:rnd(0,6.28) });
+function drawStars(dt, speed) {
+  for (const s of stars) {
+    s.y += s.s * speed * dt * 60;
+    if (s.y > H) { s.y = -2; s.x = rnd(0,W); }
+    s.tw += dt * 3;
+    ctx.globalAlpha = 0.35 + 0.65 * Math.abs(Math.sin(s.tw));
+    ctx.fillStyle = s.c;
+    ctx.fillRect(s.x, s.y, s.s > 1.2 ? 2 : 1, s.s > 1.2 ? 2 : 1);
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ---------------- pixel sprites ---------------- */
+/* Each sprite is rows of chars mapped to colors; drawn at 2px per cell (sprite ~26px wide) */
+function makeSprite(rows, map) {
+  const c = document.createElement('canvas');
+  const px = 2;
+  c.width = rows[0].length * px; c.height = rows.length * px;
+  const g = c.getContext('2d');
+  for (let y=0;y<rows.length;y++) for (let x=0;x<rows[y].length;x++) {
+    const ch = rows[y][x];
+    if (ch !== '.') { g.fillStyle = map[ch]; g.fillRect(x*px, y*px, px, px); }
+  }
+  return c;
+}
+
+const SPR = {};
+SPR.player = makeSprite([
+  "......W......",
+  "......W......",
+  ".....WWW.....",
+  ".....WRW.....",
+  "..B..WRW..B..",
+  "..B.WWRWW.B..",
+  "..BWWWRWWWB..",
+  ".BBWWRRRWWBB.",
+  ".BWWWRRRWWWB.",
+  "BBWWWWRWWWWBB",
+  "BWW.WWWWW.WWB",
+  "BW...WWW...WB",
+  ".....W.W....."
+], { W:'#e8f4ff', R:'#ff3355', B:'#3d7dff' });
+
+SPR.drone = makeSprite([  /* bee-type: yellow + cyan wings */
+  "..C.......C..",
+  "..CC.....CC..",
+  "...C.YYY.C...",
+  "..CCYYYYYCC..",
+  ".CCYYBYBYYCC.",
+  ".C.YYYYYYY.C.",
+  "...YYBBBYY...",
+  "....YYYYY....",
+  "...Y.YYY.Y...",
+  "..Y...Y...Y..",
+  ".Y....Y....Y."
+], { Y:'#ffd21f', C:'#39d5ff', B:'#20242e' });
+
+SPR.raider = makeSprite([ /* butterfly-type: red + white */
+  "R...........R",
+  "RR....W....RR",
+  ".RR..WWW..RR.",
+  ".RRW WWW WRR.".replace(/ /g,'W'),
+  "..RWWBWBWWR..",
+  "..WWWWWWWWW..",
+  ".WWRWWWWWRWW.",
+  ".W.RRWWWRR.W.",
+  "....RWWWR....",
+  "....R.W.R....",
+  "...R..W..R..."
+], { R:'#ff4f6d', W:'#f4f4ff', B:'#20242e' });
+
+SPR.cmdr = makeSprite([   /* commander healthy: green */
+  ".....G.G.....",
+  "..G..GGG..G..",
+  "..GG.GLG.GG..",
+  "...GGGGGGG...",
+  "..GGGLGLGGG..",
+  ".GGGGGGGGGGG.",
+  "GGLGGGGGGGLGG".replace(/L/g,'L'),
+  "GG.GGGGGGG.GG",
+  "G...GGGGG...G",
+  "....GG.GG....",
+  "...GG...GG...",
+  "..G.......G.."
+], { G:'#37e0a0', L:'#e8fff4' });
+
+SPR.cmdrHurt = makeSprite([ /* commander damaged: purple */
+  ".....P.P.....",
+  "..P..PPP..P..",
+  "..PP.PLP.PP..",
+  "...PPPPPPP...",
+  "..PPPLPLPPP..",
+  ".PPPPPPPPPPP.",
+  "PPLPPPPPPPLPP",
+  "PP.PPPPPPP.PP",
+  "P...PPPPP...P",
+  "....PP.PP....",
+  "...PP...PP...",
+  "..P.......P.."
+], { P:'#b06cff', L:'#f2e8ff' });
+
+SPR.capturedShip = makeSprite([
+  "......G......",
+  ".....GGG.....",
+  "....GGRGG....",
+  "...GGGRGGG...",
+  "..GGGRRRGGG..",
+  ".GGG.GRG.GGG.",
+  ".GG..GGG..GG."
+], { G:'#8effd2', R:'#ff3355' });
+
+/* ---------------- input ---------------- */
+const input = { touching:false, lastX:0, tapPulse:0 };
+function px2game(e) {
+  const r = canvas.getBoundingClientRect();
+  return ( (e.clientX - r.left) / r.width ) * W;
+}
+canvas.addEventListener('pointerdown', e => {
+  audio();
+  input.touching = true;
+  input.lastX = px2game(e);
+  input.tapPulse = 1;
+  if (game.state === 'title' || game.state === 'gameover') startRequested = true;
+  e.preventDefault();
+});
+canvas.addEventListener('pointermove', e => {
+  if (!input.touching) return;
+  const x = px2game(e);
+  player.targetX += (x - input.lastX) * 1.25;   /* relative drag steering */
+  input.lastX = x;
+  e.preventDefault();
+});
+addEventListener('pointerup',     () => input.touching = false);
+addEventListener('pointercancel', () => input.touching = false);
+
+/* ---------------- game objects ---------------- */
+const game = {
+  state: 'title',       /* title | entering | play | playerdown | stageclear | gameover */
+  stage: 1, score: 0, hi: 20000, lives: 3,
+  timer: 0, msg: '', msgTimer: 0, shake: 0
+};
+let startRequested = false;
+
+const player = {
+  x: W/2, targetX: W/2, y: H - 90, w: 26, h: 26,
+  alive: true, dual: false, cooldown: 0, invuln: 0,
+  captured: false, capX: 0, capY: 0, capPhase: 0
+};
+
+let enemies = [], pShots = [], eShots = [], parts = [], floats = [];
+let formT = 0;              /* formation sway clock */
+let diveTimer = 2.5, beamTimer = 12;
+let entryQueue = [], entryTick = 0;
+
+/* formation grid: col/row -> screen slot */
+function slotPos(col, row) {
+  const spread = 1 + 0.06 * Math.sin(formT * 0.9);         /* breathing */
+  const sway = Math.sin(formT) * 26;
+  const cx = W/2 + sway;
+  return {
+    x: cx + (col - 4.5) * 32 * spread,
+    y: 78 + row * 34
+  };
+}
+
+function makeEnemy(type, col, row, path, delay) {
+  return {
+    type, col, row,                 /* type: 0 drone, 1 raider, 2 commander */
+    hp: type === 2 ? 2 : 1,
+    state: 'queued',                /* queued | entering | settle | form | dive | beam | return */
+    path, t: 0, delay,
+    x: path ? path[0].x : 0, y: path ? path[0].y : 0,
+    speed: 0.55,
+    divePath: null, fired: 0,
+    hasCaptive: false,
+    beamT: 0, wob: rnd(0, 6.28)
+  };
+}
+
+/* entry choreography: squads swoop in on bezier paths then settle */
+function entryPaths(kind) {
+  const off = 40;
+  if (kind === 0) return [ {x:-off, y:H*0.55}, {x:W*0.55, y:H*0.9}, {x:W*1.05, y:H*0.35}, {x:W*0.5, y:H*0.18} ];
+  if (kind === 1) return [ {x:W+off, y:H*0.55}, {x:W*0.45, y:H*0.9}, {x:-W*0.05, y:H*0.35}, {x:W*0.5, y:H*0.18} ];
+  if (kind === 2) return [ {x:W*0.3, y:-off}, {x:-W*0.15, y:H*0.6}, {x:W*0.6, y:H*0.75}, {x:W*0.5, y:H*0.2} ];
+  return            [ {x:W*0.7, y:-off}, {x:W*1.15, y:H*0.6}, {x:W*0.4, y:H*0.75}, {x:W*0.5, y:H*0.2} ];
+}
+
+function buildStage(n) {
+  enemies = []; pShots = []; eShots = []; entryQueue = []; entryTick = 0;
+  const rows = [
+    { type:2, cols:[2,3,4,5,6,7], row:0 },        /* commanders */
+    { type:1, cols:[1,2,3,4,5,6,7,8], row:1 },    /* raiders */
+    { type:1, cols:[1,2,3,4,5,6,7,8], row:2 },
+    { type:0, cols:[0,1,2,3,4,5,6,7,8,9], row:3 },/* drones */
+    { type:0, cols:[0,1,2,3,4,5,6,7,8,9], row:4 }
+  ];
+  let squad = 0, i = 0;
+  for (const r of rows) {
+    for (const c of r.cols) {
+      const path = entryPaths(squad % 4);
+      const e = makeEnemy(r.type, c, r.row, path, (i % 8) * 0.16 + Math.floor(i/8) * 1.5);
+      e.speed = 0.5 + n * 0.02;
+      entryQueue.push(e); enemies.push(e);
+      i++;
+      if (i % 8 === 0) squad++;
+    }
+  }
+  diveTimer = Math.max(1.2, 3.2 - n * 0.15);
+  beamTimer = rnd(9, 15);
+}
+
+/* ---------------- combat ---------------- */
+function firePlayer() {
+  const maxShots = player.dual ? 4 : 2;
+  if (pShots.length >= maxShots || player.cooldown > 0 || !player.alive || player.captured) return;
+  player.cooldown = 0.16;
+  sfx.shoot();
+  if (player.dual) {
+    pShots.push({ x: player.x - 15, y: player.y - 14 });
+    pShots.push({ x: player.x + 15, y: player.y - 14 });
+  } else {
+    pShots.push({ x: player.x, y: player.y - 14 });
+  }
+}
+
+function enemyFire(e) {
+  if (eShots.length > 8 || !player.alive) return;
+  const dx = (player.x - e.x) / 60 + rnd(-0.6, 0.6);
+  eShots.push({ x: e.x, y: e.y + 8, vx: clamp(dx, -2.4, 2.4), vy: rnd(3.2, 4.2) + game.stage * 0.1 });
+}
+
+function explode(x, y, col, n) {
+  for (let i=0;i<n;i++) {
+    const a = rnd(0, 6.28), sp = rnd(30, 160);
+    parts.push({ x, y, vx: Math.cos(a)*sp, vy: Math.sin(a)*sp, life: rnd(0.3,0.7), col });
+  }
+}
+
+function addScore(v, x, y) {
+  game.score += v;
+  if (game.score > game.hi) game.hi = game.score;
+  if (x !== undefined) floats.push({ x, y, v: '' + v, life: 0.9 });
+}
+
+function killEnemy(e, idx) {
+  const wasDiving = e.state === 'dive' || e.state === 'beam' || e.state === 'return';
+  const base = e.type === 2 ? (wasDiving ? 400 : 150) : e.type === 1 ? (wasDiving ? 160 : 80) : (wasDiving ? 100 : 50);
+  addScore(base, e.x, e.y);
+  explode(e.x, e.y, e.type === 2 ? '#b06cff' : e.type === 1 ? '#ff4f6d' : '#ffd21f', 16);
+  sfx.boom();
+  game.shake = Math.max(game.shake, 3);
+  if (e.hasCaptive) {
+    if (wasDiving) {           /* rescue! captive flies back -> dual fighter */
+      rescueShip(e.x, e.y);
+    } else {
+      floats.push({ x: e.x, y: e.y, v: 'SHIP LOST', life: 1.2 });
+    }
+  }
+  enemies.splice(idx, 1);
+}
+
+let rescueFx = null;
+function rescueShip(x, y) {
+  rescueFx = { x, y, t: 0 };
+  sfx.rescue();
+}
+
+/* ---------------- capture beam ---------------- */
+function startBeamRun(e) {
+  e.state = 'beam';
+  e.beamT = 0;
+  const bx = clamp(player.x + rnd(-40, 40), 60, W-60);
+  e.divePath = [ {x:e.x, y:e.y}, {x:e.x, y:e.y+120}, {x:bx, y:H*0.42}, {x:bx, y:H*0.47} ];
+  e.t = 0;
+  sfx.dive();
+}
+
+function capturePlayer(e) {
+  player.captured = true;
+  player.capPhase = 0;
+  e.hasCaptive = true;
+  e.capturing = true;
+  sfx.cap();
+  game.state = 'playerdown';
+  game.timer = 3.4;
+  game.msg = 'FIGHTER CAPTURED';
+  game.msgTimer = 2.5;
+}
+
+/* ---------------- dive logic ---------------- */
+function startDive(e) {
+  e.state = 'dive';
+  e.t = 0; e.fired = 0;
+  const side = e.x < W/2 ? 1 : -1;
+  e.divePath = [
+    { x: e.x, y: e.y },
+    { x: e.x + side * rnd(60,120), y: e.y + rnd(60,110) },
+    { x: clamp(player.x + rnd(-90,90), 20, W-20), y: H * rnd(0.55, 0.7) },
+    { x: clamp(player.x + rnd(-40,40), 20, W-20), y: H + 60 }
+  ];
+  sfx.dive();
+}
+
+/* ---------------- update ---------------- */
+function update(dt) {
+  formT += dt * (game.stage > 3 ? 1.25 : 1);
+  if (game.shake > 0) game.shake = Math.max(0, game.shake - dt * 14);
+  if (game.msgTimer > 0) game.msgTimer -= dt;
+
+  /* starfield speed handled in draw */
+
+  /* --- state flow --- */
+  if (game.state === 'title' || game.state === 'gameover') {
+    if (startRequested) {
+      startRequested = false;
+      game.score = 0; game.lives = 3; game.stage = 1;
+      player.dual = false; player.alive = true; player.captured = false;
+      player.x = player.targetX = W/2; player.invuln = 2;
+      buildStage(1);
+      game.state = 'entering';
+      game.msg = 'STAGE 1'; game.msgTimer = 2; sfx.stage();
+    }
+    return;
+  }
+
+  if (game.state === 'stageclear') {
+    game.timer -= dt;
+    if (game.timer <= 0) {
+      game.stage++;
+      buildStage(game.stage);
+      game.state = 'entering';
+      game.msg = 'STAGE ' + game.stage; game.msgTimer = 2; sfx.stage();
+    }
+  }
+
+  if (game.state === 'playerdown') {
+    game.timer -= dt;
+    /* captured ship animation: tractor up to the commander */
+    if (player.captured && player.capPhase === 0) {
+      const cap = enemies.find(e => e.capturing);
+      if (cap) {
+        player.y -= dt * 90;
+        player.x += (cap.x - player.x) * dt * 3;
+        if (player.y < cap.y + 30) { player.capPhase = 1; cap.capturing = false; }
+      } else player.capPhase = 1;
+    }
+    if (game.timer <= 0) {
+      if (game.lives > 0) {
+        game.lives--;
+        player.alive = true; player.captured = false; player.dual = false;
+        player.x = player.targetX = W/2; player.y = H - 90; player.invuln = 2.5;
+        game.state = 'play';
+      } else {
+        game.state = 'gameover';
+        game.msg = ''; 
+      }
+    }
+  }
+
+  /* --- entries --- */
+  entryTick += dt;
+  let anyEntering = false;
+
+  /* --- player --- */
+  if (player.alive && !player.captured && (game.state === 'play' || game.state === 'entering' || game.state === 'stageclear')) {
+    player.targetX = clamp(player.targetX, 18, W - 18);
+    player.x += (player.targetX - player.x) * Math.min(1, dt * 18);
+    player.cooldown -= dt;
+    if (player.invuln > 0) player.invuln -= dt;
+    if (input.touching) firePlayer();
+  }
+
+  /* rescue animation */
+  if (rescueFx) {
+    rescueFx.t += dt;
+    rescueFx.x += (player.x - rescueFx.x) * dt * 4;
+    rescueFx.y += (player.y - rescueFx.y) * dt * 4;
+    if (rescueFx.t > 1.4 || (Math.abs(rescueFx.x - player.x) < 8 && Math.abs(rescueFx.y - player.y) < 8)) {
+      rescueFx = null;
+      player.dual = true;
+      game.msg = 'DUAL FIGHTER!'; game.msgTimer = 2;
+    }
+  }
+
+  /* --- enemies --- */
+  const active = game.state === 'play' || game.state === 'entering';
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.wob += dt * 6;
+
+    if (e.state === 'queued') {
+      anyEntering = true;
+      if (entryTick > e.delay) { e.state = 'entering'; e.t = 0; }
+      continue;
+    }
+    if (e.state === 'entering') {
+      anyEntering = true;
+      e.t += dt * e.speed;
+      if (e.t >= 1) { e.state = 'settle'; }
+      else {
+        const p = bez(e.path[0], e.path[1], e.path[2], e.path[3], e.t);
+        e.x = p.x; e.y = p.y;
+        if (e.t > 0.5 && e.t < 0.9 && Math.random() < dt * 0.5 && game.state !== 'entering') enemyFire(e);
+      }
+    }
+    if (e.state === 'settle') {
+      const s = slotPos(e.col, e.row);
+      e.x += (s.x - e.x) * Math.min(1, dt * 5);
+      e.y += (s.y - e.y) * Math.min(1, dt * 5);
+      if (Math.abs(e.x - s.x) < 3 && Math.abs(e.y - s.y) < 3) e.state = 'form';
+      anyEntering = true;
+    }
+    if (e.state === 'form') {
+      const s = slotPos(e.col, e.row);
+      e.x = s.x; e.y = s.y;
+    }
+    if (e.state === 'dive' && active) {
+      e.t += dt * (0.42 + game.stage * 0.02);
+      if (e.t >= 1) {
+        /* re-enter from top back to slot */
+        e.state = 'return';
+        e.x = e.divePath[3].x; e.y = -30;
+      } else {
+        const p = bez(e.divePath[0], e.divePath[1], e.divePath[2], e.divePath[3], e.t);
+        e.x = p.x; e.y = p.y;
+        if (e.fired < 2 && e.t > 0.3 + e.fired * 0.25) { e.fired++; enemyFire(e); }
+      }
+    }
+    if (e.state === 'beam' && active) {
+      if (e.t < 1) {
+        e.t += dt * 0.5;
+        const p = bez(e.divePath[0], e.divePath[1], e.divePath[2], e.divePath[3], Math.min(1, e.t));
+        e.x = p.x; e.y = p.y;
+      } else {
+        e.beamT += dt;
+        if (e.beamT > 0.2 && e.beamT < 0.35 && !e.beamSnd) { e.beamSnd = true; sfx.beam(); }
+        /* beam active window */
+        if (e.beamT > 0.4 && e.beamT < 2.6 && player.alive && !player.captured && player.invuln <= 0 && game.state === 'play') {
+          const half = 34 * ((e.beamT - 0.4) / 2.2) + 10;
+          if (Math.abs(player.x - e.x) < half && player.y > e.y) {
+            capturePlayer(e);
+          }
+        }
+        if (e.beamT > 3) { e.state = 'return'; e.beamSnd = false; e.y = e.y; }
+      }
+    }
+    if (e.state === 'return') {
+      const s = slotPos(e.col, e.row);
+      const dx = s.x - e.x, dy = s.y - e.y;
+      const d = Math.hypot(dx, dy);
+      const sp = 170 * dt;
+      if (d < sp || d < 4) { e.state = 'form'; }
+      else { e.x += dx / d * sp; e.y += dy / d * sp; }
+    }
+  }
+
+  if (game.state === 'entering' && !anyEntering && entryQueue.length) {
+    game.state = 'play';
+  }
+
+  /* --- dive scheduler --- */
+  if (game.state === 'play') {
+    diveTimer -= dt;
+    beamTimer -= dt;
+    if (diveTimer <= 0) {
+      const formed = enemies.filter(e => e.state === 'form');
+      if (formed.length) {
+        const n = Math.min(formed.length, 1 + Math.floor(Math.random() * Math.min(3, 1 + game.stage / 2)));
+        for (let k=0;k<n;k++) {
+          const pick = formed.splice(Math.floor(Math.random()*formed.length), 1)[0];
+          if (pick) startDive(pick);
+        }
+      }
+      diveTimer = Math.max(0.9, rnd(1.6, 3.0) - game.stage * 0.12);
+    }
+    if (beamTimer <= 0) {
+      const cmdrs = enemies.filter(e => e.type === 2 && e.state === 'form' && !e.hasCaptive);
+      if (cmdrs.length && !player.dual && Math.random() < 0.8) {
+        startBeamRun(cmdrs[Math.floor(Math.random()*cmdrs.length)]);
+      }
+      beamTimer = rnd(10, 16);
+    }
+    if (enemies.length === 0) {
+      game.state = 'stageclear';
+      game.timer = 2;
+      game.msg = 'STAGE CLEAR'; game.msgTimer = 2;
+    }
+  }
+
+  /* --- player shots --- */
+  for (let i = pShots.length - 1; i >= 0; i--) {
+    const s = pShots[i];
+    s.y -= 560 * dt;
+    if (s.y < -12) { pShots.splice(i,1); continue; }
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if (e.state === 'queued') continue;
+      if (Math.abs(s.x - e.x) < 13 && Math.abs(s.y - e.y) < 12) {
+        pShots.splice(i,1);
+        e.hp--;
+        if (e.hp <= 0) killEnemy(e, j);
+        else { sfx.hit(); explode(e.x, e.y, '#b06cff', 5); addScore(30); }
+        break;
+      }
+    }
+  }
+
+  /* --- enemy shots --- */
+  for (let i = eShots.length - 1; i >= 0; i--) {
+    const s = eShots[i];
+    s.x += s.vx * 60 * dt; s.y += s.vy * 60 * dt;
+    if (s.y > H + 10 || s.x < -10 || s.x > W + 10) { eShots.splice(i,1); continue; }
+    if (player.alive && !player.captured && player.invuln <= 0 && game.state === 'play' &&
+        Math.abs(s.x - player.x) < 11 && Math.abs(s.y - player.y) < 11) {
+      eShots.splice(i,1);
+      playerHit();
+    }
+  }
+
+  /* --- collision with diving enemies --- */
+  if (player.alive && !player.captured && player.invuln <= 0 && game.state === 'play') {
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if ((e.state === 'dive' || e.state === 'entering') &&
+          Math.abs(e.x - player.x) < 16 && Math.abs(e.y - player.y) < 16) {
+        killEnemy(e, j);
+        playerHit();
+        break;
+      }
+    }
+  }
+
+  /* --- particles / floats --- */
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= (1 - dt*2); p.vy *= (1 - dt*2);
+    p.life -= dt;
+    if (p.life <= 0) parts.splice(i,1);
+  }
+  for (let i = floats.length - 1; i >= 0; i--) {
+    floats[i].y -= 24 * dt; floats[i].life -= dt;
+    if (floats[i].life <= 0) floats.splice(i,1);
+  }
+}
+
+function playerHit() {
+  if (player.dual) {           /* dual absorbs one hit */
+    player.dual = false;
+    explode(player.x + 14, player.y, '#e8f4ff', 14);
+    sfx.boom();
+    player.invuln = 2;
+    return;
+  }
+  player.alive = false;
+  explode(player.x, player.y, '#ff3355', 26);
+  explode(player.x, player.y, '#e8f4ff', 14);
+  sfx.die();
+  game.shake = 6;
+  game.state = 'playerdown';
+  game.timer = 2.2;
+}
+
+/* ---------------- draw ---------------- */
+function drawSprite(img, x, y, rot, scale) {
+  ctx.save();
+  ctx.translate(x, y);
+  if (rot) ctx.rotate(rot);
+  const s = scale || 1;
+  ctx.drawImage(img, -img.width*s/2, -img.height*s/2, img.width*s, img.height*s);
+  ctx.restore();
+}
+
+function text(str, x, y, size, col, align) {
+  ctx.font = '700 ' + size + 'px "Courier New", monospace';
+  ctx.textAlign = align || 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#000';
+  ctx.fillText(str, x+1.5, y+1.5);
+  ctx.fillStyle = col;
+  ctx.fillText(str, x, y);
+}
+
+function draw(dt) {
+  ctx.fillStyle = '#000010';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  if (game.shake > 0) ctx.translate(rnd(-game.shake, game.shake), rnd(-game.shake, game.shake));
+
+  drawStars(dt, game.state === 'stageclear' ? 4 : 1.2);
+
+  /* beams */
+  for (const e of enemies) {
+    if (e.state === 'beam' && e.t >= 1 && e.beamT > 0.15 && e.beamT < 2.9) {
+      const grow = clamp((e.beamT - 0.15) / 0.5, 0, 1);
+      const half = 44 * grow;
+      const pulse = 0.5 + 0.5 * Math.sin(e.beamT * 20);
+      const grd = ctx.createLinearGradient(0, e.y, 0, H - 60);
+      grd.addColorStop(0, 'rgba(87,200,255,' + (0.55 * pulse * grow) + ')');
+      grd.addColorStop(1, 'rgba(87,200,255,0.05)');
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.moveTo(e.x - 6, e.y + 8);
+      ctx.lineTo(e.x - half, H - 40);
+      ctx.lineTo(e.x + half, H - 40);
+      ctx.lineTo(e.x + 6, e.y + 8);
+      ctx.closePath();
+      ctx.fill();
+      /* beam stripes */
+      ctx.fillStyle = 'rgba(232,255,255,' + (0.25 * pulse * grow) + ')';
+      for (let k=0;k<4;k++) {
+        const yy = e.y + 30 + ((e.beamT * 160 + k*70) % (H - 90 - e.y));
+        const f = (yy - e.y) / (H - 40 - e.y);
+        ctx.fillRect(e.x - half * f, yy, half * 2 * f, 3);
+      }
+    }
+  }
+
+  /* enemies */
+  for (const e of enemies) {
+    if (e.state === 'queued') continue;
+    let img = e.type === 0 ? SPR.drone : e.type === 1 ? SPR.raider : (e.hp <= 1 ? SPR.cmdrHurt : SPR.cmdr);
+    let rot = 0;
+    if (e.state === 'entering' || e.state === 'dive') {
+      rot = Math.sin(e.wob) * 0.25 + Math.PI; /* nose-down while flying */
+      if (e.state === 'dive') rot = Math.PI + Math.sin(e.wob*1.5)*0.35;
+    } else {
+      rot = Math.sin(e.wob * 0.4) * 0.06;
+    }
+    drawSprite(img, e.x, e.y, rot, 1);
+    if (e.hasCaptive) drawSprite(SPR.capturedShip, e.x, e.y - 20, 0, 0.9);
+  }
+
+  /* rescue fx */
+  if (rescueFx) {
+    drawSprite(SPR.capturedShip, rescueFx.x, rescueFx.y, rescueFx.t * 6, 1);
+    ctx.globalAlpha = 0.6;
+    ctx.strokeStyle = '#8effd2';
+    ctx.beginPath(); ctx.arc(rescueFx.x, rescueFx.y, 16 + Math.sin(rescueFx.t*12)*4, 0, 6.28); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  /* shots */
+  ctx.fillStyle = '#e8f4ff';
+  for (const s of pShots) { ctx.fillRect(s.x-1.5, s.y-7, 3, 12); ctx.fillStyle = '#ff3355'; ctx.fillRect(s.x-1.5, s.y-9, 3, 3); ctx.fillStyle = '#e8f4ff'; }
+  for (const s of eShots) {
+    ctx.fillStyle = '#ffd21f';
+    ctx.fillRect(s.x-2, s.y-4, 4, 8);
+    ctx.fillStyle = '#ff4f6d';
+    ctx.fillRect(s.x-2, s.y-2, 4, 4);
+  }
+
+  /* player */
+  if (player.alive && (game.state === 'play' || game.state === 'entering' || game.state === 'stageclear' ||
+      (game.state === 'playerdown' && player.captured))) {
+    const blink = player.invuln > 0 && Math.floor(player.invuln * 12) % 2 === 0;
+    if (!blink) {
+      if (player.captured) {
+        if (player.capPhase === 0) drawSprite(SPR.player, player.x, player.y, Math.sin(formT*10)*0.3, 1);
+      } else if (player.dual) {
+        drawSprite(SPR.player, player.x - 15, player.y, 0, 1);
+        drawSprite(SPR.player, player.x + 15, player.y, 0, 1);
+      } else {
+        drawSprite(SPR.player, player.x, player.y, 0, 1);
+      }
+    }
+  }
+
+  /* particles */
+  for (const p of parts) {
+    ctx.globalAlpha = clamp(p.life * 2, 0, 1);
+    ctx.fillStyle = p.col;
+    ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+
+  /* score floats */
+  for (const f of floats) {
+    ctx.globalAlpha = clamp(f.life, 0, 1);
+    text(f.v, f.x, f.y, 11, '#8effd2');
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+
+  /* ---------------- HUD ---------------- */
+  text('1UP', 34, 16, 11, '#ff2244');
+  text(('' + game.score).padStart(6,'0'), 34, 30, 12, '#ffffff');
+  text('HI-SCORE', W/2, 16, 11, '#ff2244');
+  text(('' + game.hi).padStart(6,'0'), W/2, 30, 12, '#ffffff');
+  text('STAGE ' + game.stage, W - 44, 16, 10, '#39d5ff');
+  /* lives */
+  for (let i=0;i<game.lives;i++) drawSprite(SPR.player, 18 + i*22, H - 18, 0, 0.72);
+
+  /* messages */
+  if (game.msgTimer > 0 && game.msg) {
+    const a = clamp(game.msgTimer, 0, 1);
+    ctx.globalAlpha = a;
+    text(game.msg, W/2, H*0.42, 20, '#39d5ff');
+    ctx.globalAlpha = 1;
+  }
+
+  if (game.state === 'title') {
+    text('N O V A', W/2, H*0.28, 40, '#ffd21f');
+    text('S Q U A D R O N', W/2, H*0.35, 22, '#39d5ff');
+    drawSprite(SPR.cmdr,   W/2 - 60, H*0.47, 0, 1.3); text('COMMANDER  400', W/2 + 24, H*0.47, 11, '#37e0a0', 'left');
+    drawSprite(SPR.raider, W/2 - 60, H*0.53, 0, 1.3); text('RAIDER     160', W/2 + 24, H*0.53, 11, '#ff4f6d', 'left');
+    drawSprite(SPR.drone,  W/2 - 60, H*0.59, 0, 1.3); text('DRONE      100', W/2 + 24, H*0.59, 11, '#ffd21f', 'left');
+    if (Math.floor(performance.now()/500) % 2 === 0)
+      text('TAP TO START', W/2, H*0.72, 16, '#ffffff');
+    text('drag to steer · hold to fire', W/2, H*0.79, 11, '#9db4ff');
+    text('beware the capture beam —', W/2, H*0.86, 10, '#57c8ff');
+    text('shoot a diving captor to fly dual', W/2, H*0.895, 10, '#57c8ff');
+  }
+
+  if (game.state === 'gameover') {
+    text('GAME OVER', W/2, H*0.4, 28, '#ff2244');
+    text('SCORE  ' + game.score, W/2, H*0.48, 16, '#ffffff');
+    if (game.score >= game.hi) text('NEW HIGH SCORE!', W/2, H*0.54, 13, '#ffd21f');
+    if (Math.floor(performance.now()/500) % 2 === 0)
+      text('TAP TO PLAY AGAIN', W/2, H*0.64, 14, '#ffffff');
+  }
+
+  /* scanlines */
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = '#000';
+  for (let y=0; y<H; y+=3) ctx.fillRect(0, y, W, 1);
+  ctx.globalAlpha = 1;
+}
+
+/* ---------------- loop ---------------- */
+let last = performance.now();
+function loop(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.05) dt = 0.05;
+  update(dt);
+  draw(dt);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
