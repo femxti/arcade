@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0e0c18">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <title>Filip Flagermus</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Grandstander:wght@700;900&family=Nunito:wght@600;800&display=swap">
@@ -20,7 +22,8 @@
   --body: "Nunito", system-ui, -apple-system, "Segoe UI", sans-serif;
   color-scheme: dark;
 }
-html, body { height: 100%; }
+html, body { height: 100%; margin: 0; }
+[hidden] { display: none !important; }
 /* no grey/blue flash from the phone when the game is tapped */
 * { -webkit-tap-highlight-color: transparent; }
 canvas, .frame, .stage { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; touch-action: none; outline: none; }
@@ -36,8 +39,8 @@ body {
   height: 100%;
   display: grid;
   place-items: center;
-  padding-inline: max(16px, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
   box-sizing: border-box;
+  background: var(--deep);
 }
 .rotate {
   display: none;
@@ -53,29 +56,26 @@ body {
 @media (orientation: portrait) and (max-width: 700px) { .rotate { display: grid; } }
 @media (max-height: 460px) {
   .score { font-size: 1.8rem; }
-  .hud { inset: 8px 14px auto 14px; }
   .panel { padding: 14px 16px; gap: 6px; width: min(70%, 340px); }
   .panel h1 { font-size: 1.8rem; }
   .panel h2 { font-size: 1.5rem; }
   .panel p { font-size: .85rem; }
   button.go { padding: 9px 24px; margin-top: 2px; }
-  canvas { border-radius: 10px; }
 }
 .frame {
   position: relative;
-  width: min(100%, calc((100dvh - 16px) * 16 / 9), 1100px);
-  aspect-ratio: 16 / 9;
+  /* sized from script to fill the screen at the game's aspect */
+  width: 100vw; height: 100vh;
 }
 canvas {
   width: 100%; height: 100%;
   display: block;
-  border-radius: 18px;
   background: var(--rock);
-  box-shadow: 0 0 0 1px #2c2742, 0 20px 60px #000a;
   cursor: pointer;
 }
 .hud {
-  position: absolute; inset: 14px 16px auto 16px;
+  position: absolute;
+  inset: max(12px, env(safe-area-inset-top, 0px)) max(18px, env(safe-area-inset-right, 0px)) auto max(18px, env(safe-area-inset-left, 0px));
   display: flex; justify-content: space-between; align-items: center;
   pointer-events: none;
   font-family: var(--display); font-weight: 900;
@@ -123,6 +123,8 @@ button.go:active { transform: translateY(3px); box-shadow: 0 1px 0 #b3802a; }
 button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
 #win { top: auto; bottom: 12px; transform: translateX(-50%); }
 .mute {
+  right: max(12px, env(safe-area-inset-right, 0px)) !important;
+  bottom: max(12px, env(safe-area-inset-bottom, 0px)) !important;
   position: absolute; right: 12px; bottom: 12px;
   font: 800 .8rem var(--body); letter-spacing: .06em; text-transform: uppercase;
   color: var(--mute); background: #0006; border: 1px solid #3a3358;
@@ -145,7 +147,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
 
     <div class="panel" id="start">
       <h1>Filip Flagermus</h1>
-      <p>Help Filip flutter through the stalactite cave. Tap to flap. Catch moths and butterflies for points, and bananas for an extra heart. Watch out for rocks, floor, ceiling and grumpy killer bees. Evil Owl in Level 2, spiders in Level 3, Frida wants a kiss in Level 4, and Level 5 is the hawk boss!</p>
+      <p>Tap to flap through the cave. Moths and butterflies give points, bananas give hearts. Don't touch the rocks, the floor or the ceiling!</p>
       <p class="keys">Tap · click · space</p>
       <button class="go" id="startBtn">Fly!</button>
     </div>
@@ -173,7 +175,24 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
 (() => {
   const cv = document.getElementById('c');
   const ctx = cv.getContext('2d');
-  const W = 800, H = 450;
+  let W = 800; const H = 450; // height is fixed game units; width follows the screen
+  const frameEl = document.getElementById('frame');
+  let dpr = 1;
+  function fit() {
+    const vw = window.visualViewport ? visualViewport.width : innerWidth;
+    const vh = window.visualViewport ? visualViewport.height : innerHeight;
+    // show more cave sideways on wide phones, never less than a 4:3 view
+    W = Math.round(Math.max(600, Math.min(1150, H * vw / vh)));
+    const scale = Math.min(vw / W, vh / H);
+    frameEl.style.width = Math.round(W * scale) + 'px';
+    frameEl.style.height = Math.round(H * scale) + 'px';
+    dpr = Math.min(2, (window.devicePixelRatio || 1) * scale);
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  }
+  fit();
+  addEventListener('resize', fit);
+  addEventListener('orientationchange', () => setTimeout(fit, 250));
+  if (window.visualViewport) visualViewport.addEventListener('resize', fit);
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   // --- Easy-mode tuning (landscape) ---
@@ -1065,6 +1084,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
   }
 
   function draw() {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.save();
     if (shake && !reduced) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
     drawBackground();
