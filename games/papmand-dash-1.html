@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>PAPMAND DASH</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#000; overflow:hidden; touch-action:none; overscroll-behavior:none; }
+  #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000; }
+  canvas { display:block; image-rendering:pixelated; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<script>
+"use strict";
+/* ============================================================
+   PAPMAND DASH — a Boulder Dash-style digger for mobile
+   Arrow pad at the bottom = step in that direction
+   Dig dirt · collect diamonds · dodge falling boulders
+   Fill the quota, then find the flashing exit
+   ============================================================ */
+
+const W = 360, H = 640;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function fit() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width  = (W * scale) + 'px';
+  canvas.style.height = (H * scale) + 'px';
+  canvas.width  = Math.floor(W * dpr);
+  canvas.height = Math.floor(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+}
+fit();
+addEventListener('resize', fit);
+
+/* ---------------- audio ---------------- */
+let AC = null;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+function beep(freq, dur, type, vol, slide) {
+  if (!AC) return;
+  const t = AC.currentTime;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type || 'square';
+  o.frequency.setValueAtTime(freq, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, freq + slide), t + dur);
+  g.gain.setValueAtTime(vol || 0.08, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(AC.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+const sfx = {
+  dig:   () => beep(rnd(140,190), 0.05, 'triangle', 0.06, -60),
+  gem:   () => beep(rnd(900,1300), 0.1, 'square', 0.05, 300),
+  thud:  () => beep(90, 0.09, 'sawtooth', 0.09, -40),
+  push:  () => beep(70, 0.08, 'triangle', 0.08),
+  boom:  () => { beep(110, 0.3, 'sawtooth', 0.11, -70); beep(55, 0.4, 'triangle', 0.1, -25); },
+  die:   () => beep(350, 0.6, 'sawtooth', 0.11, -300),
+  open:  () => { beep(523,0.09,'square',0.07); setTimeout(()=>beep(659,0.09,'square',0.07),90); setTimeout(()=>beep(784,0.09,'square',0.07),180); setTimeout(()=>beep(1046,0.18,'square',0.07),270); },
+  clear: () => { beep(659,0.1,'square',0.07); setTimeout(()=>beep(880,0.1,'square',0.07),110); setTimeout(()=>beep(1046,0.22,'square',0.07),220); },
+  tick:  () => beep(1200, 0.04, 'square', 0.04)
+};
+
+/* ---------------- helpers ---------------- */
+const rnd = (a,b) => a + Math.random() * (b - a);
+const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
+
+/* ---------------- tiles ---------------- */
+const T = { EMPTY:0, DIRT:1, BRICK:2, STEEL:3, ROCK:4, GEM:5, EXITC:6, EXITO:7, FLY:8, BFLY:9, EXPL:10 };
+const TS = 36;                       /* tile size on screen */
+const CW = 40, CH = 24;              /* cave dimensions: far wider than the window */
+const HUD = 50;                      /* score bar along the top */
+const DPAD_H = 178;                  /* control pad along the bottom */
+const VW = W, VH = H - HUD - DPAD_H; /* the slice of cave you actually see */
+
+/* the pad: four arrows in a cross, generous enough for a thumb */
+const BTN = 52, GAP = 56;
+const PAD_CX = W / 2, PAD_CY = H - DPAD_H / 2 + 2;
+const DPAD = [
+  { dir: [ 0,-1], cx: PAD_CX,       cy: PAD_CY - GAP },
+  { dir: [ 0, 1], cx: PAD_CX,       cy: PAD_CY + GAP },
+  { dir: [-1, 0], cx: PAD_CX - GAP, cy: PAD_CY },
+  { dir: [ 1, 0], cx: PAD_CX + GAP, cy: PAD_CY }
+];
+
+/* ---------------- game state ---------------- */
+const game = {
+  state: 'title',        /* title | start | play | dead | clear | gameover */
+  score: 0, hi: 5000, lives: 3, cave: 1,
+  need: 10, got: 0, time: 120,
+  timer: 0, msg: '', msgTimer: 0, flash: 0
+};
+let startRequested = false;
+
+let grid, fall, dirGrid;             /* tile grid, falling flags, enemy directions */
+let expl = [];                       /* {x,y,ttl,to} */
+let player = { x:1, y:1, alive:true, face:1, blink:0, idleT:0,
+               lookX:1, lookY:0, walkT:9, stepN:0, joyT:0 };
+let exitPos = { x:0, y:0 };
+let cam = { x:0, y:0 };
+let tickT = 0, moveT = 0;
+const TICK = 0.15;
+
+const idx = (x,y) => y*CW + x;
+const at  = (x,y) => (x<0||y<0||x>=CW||y>=CH) ? T.STEEL : grid[idx(x,y)];
+const set = (x,y,v) => { if (x>=0&&y>=0&&x<CW&&y<CH) grid[idx(x,y)] = v; };
+
+/* ---------------- cave generation ---------------- */
+function caveParams(n) {
+  return {
+    rockP:  0.16 + Math.min(0.1, n*0.012),
+    gemP:   0.055,
+    brickP: 0.05 + Math.min(0.06, n*0.008),
+    flies:  Math.min(6, 1 + Math.floor(n/1.5)),
+    bflies: n >= 3 ? Math.min(4, Math.floor((n-1)/2)) : 0,
+    need:   8 + n * 2,
+    time:   Math.max(110, 190 - n * 5)   /* a wider cave takes longer to cross */
+  };
+}
+
+function genCave(n) {
+  const P = caveParams(n);
+  grid = new Uint8Array(CW*CH);
+  fall = new Uint8Array(CW*CH);
+  dirGrid = new Int8Array(CW*CH);
+  expl = [];
+  let gems = 0;
+
+  for (let y=0;y<CH;y++) for (let x=0;x<CW;x++) {
+    if (x===0||y===0||x===CW-1||y===CH-1) { set(x,y,T.STEEL); continue; }
+    const r = Math.random();
+    if (r < P.gemP) { set(x,y,T.GEM); gems++; }
+    else if (r < P.gemP + P.rockP) set(x,y,T.ROCK);
+    else if (r < P.gemP + P.rockP + P.brickP) set(x,y,T.BRICK);
+    else set(x,y,T.DIRT);
+  }
+  /* guarantee enough gems */
+  while (gems < P.need + 8) {
+    const x = 1 + Math.floor(rnd(0,CW-2)), y = 1 + Math.floor(rnd(0,CH-2));
+    if (at(x,y) === T.DIRT) { set(x,y,T.GEM); gems++; }
+  }
+
+  /* player start: top-left pocket */
+  player.x = 2; player.y = 2; player.alive = true; player.face = 1;
+  for (let y=1;y<=3;y++) for (let x=1;x<=3;x++) set(x,y,T.DIRT);
+  set(2,2,T.EMPTY);
+  set(2,1,T.DIRT); /* no rock above the start */
+
+  /* exit: bottom-right corner, embedded in the border */
+  exitPos = { x: CW-2, y: CH-2 };
+  set(exitPos.x, exitPos.y, T.EXITC);
+  /* keep the approach diggable */
+  if (at(exitPos.x-1, exitPos.y) === T.ROCK) set(exitPos.x-1, exitPos.y, T.DIRT);
+  if (at(exitPos.x, exitPos.y-1) === T.ROCK) set(exitPos.x, exitPos.y-1, T.DIRT);
+
+  /* enemies in carved pockets, away from start */
+  let placed = 0, tries = 0;
+  while (placed < P.flies + P.bflies && tries++ < 400) {
+    const x = 3 + Math.floor(rnd(0,CW-6)), y = 3 + Math.floor(rnd(0,CH-6));
+    if (Math.hypot(x-player.x, y-player.y) < 9) continue;
+    if (at(x,y) !== T.DIRT) continue;
+    /* small cavity so they can start patrolling */
+    set(x,y, placed < P.flies ? T.FLY : T.BFLY);
+    dirGrid[idx(x,y)] = Math.floor(rnd(0,4));
+    if (at(x+1,y) === T.DIRT) set(x+1,y,T.EMPTY);
+    if (at(x,y+1) === T.DIRT) set(x,y+1,T.EMPTY);
+    placed++;
+  }
+
+  game.need = P.need; game.got = 0; game.time = P.time;
+  cam.x = 0; cam.y = 0;
+}
+
+/* ---------------- physics tick (classic scan) ---------------- */
+const ROUND = v => v === T.ROCK || v === T.GEM || v === T.BRICK;
+
+function boom(cx, cy, toGem) {
+  sfx.boom();
+  game.flash = 0.25;
+  for (let y=cy-1;y<=cy+1;y++) for (let x=cx-1;x<=cx+1;x++) {
+    const v = at(x,y);
+    if (v === T.STEEL || v === T.EXITC || v === T.EXITO) continue;
+    if (x === player.x && y === player.y) killPlayer(false);
+    if (v === T.FLY) { set(x,y,T.EMPTY); }          /* chain-adjacent enemies simply removed */
+    if (v === T.BFLY){ set(x,y,T.EMPTY); }
+    set(x,y,T.EXPL);
+    expl.push({ x, y, ttl: 2, to: toGem ? T.GEM : T.EMPTY });
+  }
+}
+
+function killPlayer(withBoom) {
+  if (!player.alive) return;
+  player.alive = false;
+  sfx.die();
+  if (withBoom) boom(player.x, player.y, false);
+  game.state = 'dead';
+  game.timer = 1.6;
+}
+
+function physTick() {
+  /* explosions settle */
+  for (let i = expl.length - 1; i >= 0; i--) {
+    expl[i].ttl--;
+    if (expl[i].ttl <= 0) {
+      if (at(expl[i].x, expl[i].y) === T.EXPL) set(expl[i].x, expl[i].y, expl[i].to);
+      expl.splice(i,1);
+    }
+  }
+
+  /* falling & rolling — scan bottom-up so things fall one cell per tick */
+  for (let y = CH-2; y >= 1; y--) {
+    for (let x = 1; x < CW-1; x++) {
+      const v = at(x,y);
+      if (v !== T.ROCK && v !== T.GEM) continue;
+      const i = idx(x,y);
+      const below = at(x,y+1);
+      const belowIsPlayer = (x === player.x && y+1 === player.y);
+      const belowEnemy = below === T.FLY || below === T.BFLY;
+
+      if (below === T.EMPTY && !belowIsPlayer) {
+        set(x,y,T.EMPTY); set(x,y+1,v);
+        fall[idx(x,y+1)] = 1; fall[i] = 0;
+        continue;
+      }
+      if (fall[i]) {
+        if (belowIsPlayer) { set(x,y,T.EMPTY); set(x,y+1,v); fall[idx(x,y+1)]=1; killPlayer(true); fall[i]=0; continue; }
+        if (belowEnemy)   { const gem = below === T.BFLY; set(x,y+1,T.EMPTY); boom(x, y+1, gem); fall[i]=0; continue; }
+      }
+      /* roll off rounded things */
+      if (ROUND(below)) {
+        const pl = (player.x === x-1 && player.y === y) || (player.x === x-1 && player.y === y+1);
+        const pr = (player.x === x+1 && player.y === y) || (player.x === x+1 && player.y === y+1);
+        if (at(x-1,y) === T.EMPTY && at(x-1,y+1) === T.EMPTY && !pl) {
+          set(x,y,T.EMPTY); set(x-1,y,v); fall[idx(x-1,y)] = 1; fall[i]=0; continue;
+        }
+        if (at(x+1,y) === T.EMPTY && at(x+1,y+1) === T.EMPTY && !pr) {
+          set(x,y,T.EMPTY); set(x+1,y,v); fall[idx(x+1,y)] = 1; fall[i]=0; continue;
+        }
+      }
+      if (fall[i]) { fall[i] = 0; sfx.thud(); }
+    }
+  }
+
+  /* enemies: wall followers (FLY turns left, BFLY turns right) */
+  const DX = [0,1,0,-1], DY = [-1,0,1,0];
+  const moved = new Set();
+  for (let y=1;y<CH-1;y++) for (let x=1;x<CW-1;x++) {
+    const v = at(x,y);
+    if (v !== T.FLY && v !== T.BFLY) continue;
+    const key = idx(x,y);
+    if (moved.has(key)) continue;
+
+    /* touch player -> explode */
+    let adj = false;
+    for (let d=0;d<4;d++) if (x+DX[d]===player.x && y+DY[d]===player.y) adj = true;
+    if (adj && player.alive) { boom(x,y, v===T.BFLY); continue; }
+
+    const dir = dirGrid[key];
+    const pref = v === T.FLY
+      ? [ (dir+3)%4, dir, (dir+1)%4, (dir+2)%4 ]
+      : [ (dir+1)%4, dir, (dir+3)%4, (dir+2)%4 ];
+    let did = false;
+    for (const d of pref) {
+      const nx = x+DX[d], ny = y+DY[d];
+      if (at(nx,ny) === T.EMPTY && !(nx===player.x && ny===player.y)) {
+        set(x,y,T.EMPTY); set(nx,ny,v);
+        dirGrid[idx(nx,ny)] = d;
+        moved.add(idx(nx,ny));
+        did = true;
+        break;
+      }
+    }
+    if (!did) dirGrid[key] = (dir+2)%4;
+  }
+}
+
+/* ---------------- player movement ---------------- */
+function tryMove(dx, dy) {
+  if (!player.alive || game.state !== 'play') return;
+  const nx = player.x + dx, ny = player.y + dy;
+  const v = at(nx,ny);
+  if (dx !== 0) player.face = dx;
+  player.lookX = dx; player.lookY = dy;      /* his eyes go where he is heading */
+
+  if (v === T.DIRT)  { set(nx,ny,T.EMPTY); stepTo(nx,ny); sfx.dig(); return; }
+  if (v === T.EMPTY) { stepTo(nx,ny); return; }
+  if (v === T.GEM)   {
+    set(nx,ny,T.EMPTY); stepTo(nx,ny);
+    game.got++;
+    game.score += game.got > game.need ? 25 : 10;
+    if (game.score > game.hi) game.hi = game.score;
+    sfx.gem();
+    player.joyT = 0.6;                         /* a little cheer for every diamond */
+    if (game.got === game.need) {
+      set(exitPos.x, exitPos.y, T.EXITO);
+      sfx.open();
+      game.msg = 'UDGANGEN ER ÅBEN!'; game.msgTimer = 2;
+    }
+    return;
+  }
+  if (v === T.ROCK && dy === 0 && at(nx+dx, ny) === T.EMPTY && !fall[idx(nx,ny)]) {
+    /* push a boulder sideways */
+    set(nx+dx, ny, T.ROCK); set(nx,ny,T.EMPTY);
+    stepTo(nx,ny); sfx.push();
+    return;
+  }
+  if (v === T.EXITO) {
+    stepTo(nx,ny);
+    game.state = 'clear';
+    game.timer = 2.2;
+    const bonus = Math.floor(game.time) * 2;
+    game.score += bonus;
+    if (game.score > game.hi) game.hi = game.score;
+    game.msg = 'GRUBE KLARET  +' + bonus; game.msgTimer = 2.2;
+    sfx.clear();
+  }
+}
+function stepTo(nx,ny) { player.x = nx; player.y = ny; player.idleT = 0; player.walkT = 0; player.stepN++; }
+
+/* ---------------- input: the arrow pad ---------------- */
+const input = { active:false, x:0, y:0 };
+function pt(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: ((e.clientX - r.left)/r.width)*W, y: ((e.clientY - r.top)/r.height)*H };
+}
+canvas.addEventListener('pointerdown', e => {
+  audio();
+  const p = pt(e);
+  input.active = true; input.x = p.x; input.y = p.y;
+  if (game.state === 'title' || game.state === 'gameover') startRequested = true;
+  e.preventDefault();
+});
+canvas.addEventListener('pointermove', e => {
+  if (!input.active) return;
+  const p = pt(e);
+  input.x = p.x; input.y = p.y;      /* slide straight from one arrow to the next */
+  e.preventDefault();
+});
+addEventListener('pointerup',     () => { input.active = false; });
+addEventListener('pointercancel', () => { input.active = false; });
+
+/* whichever arrow the thumb is nearest, within a forgiving radius */
+function heldDir() {
+  if (!input.active) return null;
+  let best = null, bd = 1e9;
+  for (const b of DPAD) {
+    const d = Math.hypot(input.x - b.cx, input.y - b.cy);
+    if (d < bd) { bd = d; best = b; }
+  }
+  return (best && bd < BTN * 1.15) ? best.dir : null;
+}
+
+/* ---------------- update ---------------- */
+function startCave() {
+  genCave(game.cave);
+  game.state = 'play';
+  game.msg = 'GRUBE ' + game.cave + '  ·  ' + game.need + ' DIAMANTER';
+  game.msgTimer = 2.2;
+}
+
+function update(dt) {
+  if (game.msgTimer > 0) game.msgTimer -= dt;
+  if (game.flash > 0) game.flash -= dt;
+
+  if (game.state === 'title' || game.state === 'gameover') {
+    if (startRequested) {
+      startRequested = false;
+      game.score = 0; game.lives = 3; game.cave = 1;
+      startCave();
+    }
+    return;
+  }
+
+  if (game.state === 'dead') {
+    game.timer -= dt;
+    if (game.timer <= 0) {
+      if (game.lives > 1) { game.lives--; startCave(); }
+      else { game.lives = 0; game.state = 'gameover'; }
+    }
+  }
+
+  if (game.state === 'clear') {
+    game.timer -= dt;
+    if (game.timer <= 0) { game.cave++; startCave(); }
+  }
+
+  if (game.state === 'play') {
+    /* countdown */
+    const before = Math.ceil(game.time);
+    game.time -= dt;
+    const now = Math.ceil(game.time);
+    if (now <= 10 && now !== before && now > 0) sfx.tick();
+    if (game.time <= 0) { game.time = 0; killPlayer(true); }
+
+    /* stepped movement while an arrow is held */
+    moveT -= dt;
+    const d = heldDir();
+    if (d && moveT <= 0) { tryMove(d[0], d[1]); moveT = 0.13; }
+    if (!d) moveT = 0;
+
+    /* physics */
+    tickT += dt;
+    while (tickT >= TICK) { tickT -= TICK; physTick(); }
+
+    player.idleT += dt;
+    player.walkT += dt;
+    if (player.joyT > 0) player.joyT -= dt;
+    player.blink -= dt;
+    if (player.blink < -rnd(2,4)) player.blink = 0.15;
+  }
+
+  /* The window chases him only once he nears its edge, the way the
+     original scrolled: steady while you work, moving when you travel. */
+  const mx = TS * 3, my = TS * 3;
+  const px = player.x * TS, py = player.y * TS;
+  let tx = cam.x, ty = cam.y;
+  if (px < cam.x + mx)            tx = px - mx;
+  if (px + TS > cam.x + VW - mx)  tx = px + TS - VW + mx;
+  if (py < cam.y + my)            ty = py - my;
+  if (py + TS > cam.y + VH - my)  ty = py + TS - VH + my;
+  tx = clamp(tx, 0, Math.max(0, CW*TS - VW));
+  ty = clamp(ty, 0, Math.max(0, CH*TS - VH));
+  cam.x += (tx - cam.x) * Math.min(1, dt*8);
+  cam.y += (ty - cam.y) * Math.min(1, dt*8);
+}
+
+/* ---------------- drawing ---------------- */
+function text(str, x, y, size, col, align) {
+  ctx.font = '700 ' + size + 'px "Courier New", monospace';
+  ctx.textAlign = align || 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#000';
+  ctx.fillText(str, x+1.5, y+1.5);
+  ctx.fillStyle = col;
+  ctx.fillText(str, x, y);
+}
+
+function drawTile(v, sx, sy, x, y, t) {
+  switch (v) {
+    case T.DIRT: {
+      ctx.fillStyle = '#7a4b21';
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.fillStyle = '#8f5a2a';
+      if ((x*7+y*13)%3===0) ctx.fillRect(sx+3, sy+4, 4, 3);
+      if ((x*5+y*11)%4===0) ctx.fillRect(sx+12, sy+11, 5, 3);
+      ctx.fillStyle = '#5e3817';
+      if ((x*3+y*7)%3===1) ctx.fillRect(sx+8, sy+15, 5, 3);
+      if ((x*11+y*3)%5===2) ctx.fillRect(sx+14, sy+3, 4, 3);
+      break;
+    }
+    case T.BRICK: {
+      ctx.fillStyle = '#b3402e';
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.fillStyle = '#d9d0c4';
+      ctx.fillRect(sx, sy+10, TS, 2);
+      ctx.fillRect(sx + ((y%2)?5:14), sy, 2, 10);
+      ctx.fillRect(sx + ((y%2)?14:5), sy+12, 2, 10);
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      ctx.fillRect(sx, sy, TS, 2);
+      break;
+    }
+    case T.STEEL: {
+      ctx.fillStyle = '#5b6472';
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.fillStyle = '#788292';
+      ctx.fillRect(sx+2, sy+2, TS-4, TS-4);
+      ctx.fillStyle = '#454d59';
+      ctx.fillRect(sx+2, sy+TS-4, TS-4, 2);
+      ctx.fillRect(sx+TS-4, sy+2, 2, TS-4);
+      ctx.fillStyle = '#9aa5b5';
+      ctx.fillRect(sx+4, sy+4, 3, 3);
+      break;
+    }
+    case T.ROCK: {
+      if (!SPRITES.rock) SPRITES.rock = makeTile(drawRockSprite);
+      ctx.drawImage(SPRITES.rock, sx, sy, TS, TS);
+      break;
+    }
+    case T.GEM: {
+      if (!SPRITES.gem) SPRITES.gem = makeTile(drawGemSprite);
+      /* a soft glow underneath, breathing slowly */
+      const ph = t * 3 + x * 1.7 + y * 2.3;
+      ctx.fillStyle = 'rgba(120,220,255,' + (0.10 + 0.07 * Math.sin(ph)) + ')';
+      ctx.beginPath(); ctx.arc(sx + TS/2, sy + TS*0.5, TS*0.46, 0, Math.PI*2); ctx.fill();
+      ctx.drawImage(SPRITES.gem, sx, sy, TS, TS);
+      /* every diamond twinkles now and then, each on its own beat */
+      const tw = Math.sin(t * 2.2 + x * 2.9 + y * 1.3);
+      if (tw > 0.55) {
+        const a = (tw - 0.55) / 0.45;
+        const corner = (x + y) % 3;
+        const px = sx + TS * (corner === 0 ? 0.3 : corner === 1 ? 0.7 : 0.5);
+        const py = sy + TS * (corner === 2 ? 0.55 : 0.24);
+        sparkle(px, py, TS * 0.16 * (0.5 + a * 0.5), a);
+      }
+      break;
+    }
+    case T.EXITC: {
+      ctx.fillStyle = '#454d59';
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.strokeStyle = '#5b6472';
+      ctx.strokeRect(sx+3.5, sy+3.5, TS-7, TS-7);
+      break;
+    }
+    case T.EXITO: {
+      const on = Math.floor(t*6)%2===0;
+      ctx.fillStyle = on ? '#ffd21f' : '#454d59';
+      ctx.fillRect(sx, sy, TS, TS);
+      ctx.fillStyle = on ? '#20242e' : '#ffd21f';
+      ctx.fillRect(sx+6, sy+4, TS-12, TS-8);
+      break;
+    }
+    case T.FLY: {
+      const wob = Math.sin(t*10 + x*3+y);
+      ctx.fillStyle = '#ff8c1a';
+      ctx.beginPath();
+      ctx.arc(sx+TS/2, sy+TS/2, TS/3 + wob, 0, 6.28);
+      ctx.fill();
+      ctx.fillStyle = '#fff6d0';
+      ctx.fillRect(sx+TS/2-5, sy+TS/2-3, 3, 3);
+      ctx.fillRect(sx+TS/2+2, sy+TS/2-3, 3, 3);
+      ctx.strokeStyle = 'rgba(255,140,26,0.6)';
+      ctx.beginPath();
+      ctx.arc(sx+TS/2, sy+TS/2, TS/2-2 + wob, 0, 6.28);
+      ctx.stroke();
+      break;
+    }
+    case T.BFLY: {
+      const fl = Math.sin(t*12 + x)*3;
+      ctx.fillStyle = '#c86bff';
+      ctx.beginPath();
+      ctx.ellipse(sx+TS/2-5, sy+TS/2, 5, 8+fl, 0.4, 0, 6.28);
+      ctx.ellipse(sx+TS/2+5, sy+TS/2, 5, 8-fl, -0.4, 0, 6.28);
+      ctx.fill();
+      ctx.fillStyle = '#f2e8ff';
+      ctx.fillRect(sx+TS/2-1, sy+4, 2, TS-8);
+      break;
+    }
+    case T.EXPL: {
+      ctx.fillStyle = ['#fff6d0','#ffd21f','#ff8c1a'][Math.floor(t*20)%3];
+      ctx.fillRect(sx+2, sy+2, TS-4, TS-4);
+      ctx.fillStyle = '#ff4f6d';
+      ctx.fillRect(sx+6, sy+6, TS-12, TS-12);
+      break;
+    }
+  }
+}
+
+/* ---------------- sprite cache ----------------
+   Rocks and diamonds are drawn once into small canvases at twice the
+   tile size, then stamped. A screen holds dozens of them. */
+const SPRITES = {};
+function makeTile(draw) {
+  const c = document.createElement('canvas');
+  c.width = c.height = TS * 2;
+  const g = c.getContext('2d');
+  g.scale(2, 2);
+  draw(g, TS);
+  return c;
+}
+
+/* a lumpy boulder: irregular outline, lit from the upper left, chipped and cracked */
+function drawRockSprite(g, S) {
+  const cx = S / 2, cy = S / 2 + 1;
+  const radii = [0.95, 1.0, 0.9, 0.97, 0.88, 1.0, 0.93, 0.86, 0.97, 0.92, 1.0, 0.9];
+  const pts = radii.map((k, i) => {
+    const a = (i / radii.length) * Math.PI * 2 - Math.PI / 2;
+    const r = S * 0.45 * k;
+    return [cx + Math.cos(a) * r, cy + Math.sin(a) * r * (Math.sin(a) > 0 ? 0.9 : 1)];
+  });
+  const outline = () => {
+    g.beginPath();
+    pts.forEach(([x, y], i) => {
+      const [nx, ny] = pts[(i + 1) % pts.length];
+      if (i === 0) g.moveTo((x + nx) / 2, (y + ny) / 2);
+      else g.quadraticCurveTo(x, y, (x + nx) / 2, (y + ny) / 2);
+    });
+    const [x0, y0] = pts[0], [x1, y1] = pts[1];
+    g.quadraticCurveTo(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
+    g.closePath();
+  };
+  /* body */
+  const body = g.createRadialGradient(cx - S * 0.16, cy - S * 0.18, S * 0.05, cx, cy, S * 0.52);
+  body.addColorStop(0, '#c9c1b2');
+  body.addColorStop(0.45, '#958d80');
+  body.addColorStop(1, '#5a5348');
+  outline(); g.fillStyle = body; g.fill();
+  /* shade the underside */
+  g.save(); outline(); g.clip();
+  g.fillStyle = 'rgba(30,24,18,0.28)';
+  g.beginPath(); g.ellipse(cx + S * 0.08, cy + S * 0.36, S * 0.5, S * 0.22, 0, 0, Math.PI * 2); g.fill();
+  /* flat chipped faces catching the light */
+  g.fillStyle = 'rgba(255,250,235,0.22)';
+  g.beginPath(); g.moveTo(cx - S*0.3, cy - S*0.08); g.lineTo(cx - S*0.1, cy - S*0.33); g.lineTo(cx + S*0.06, cy - S*0.2); g.lineTo(cx - S*0.14, cy + S*0.02); g.closePath(); g.fill();
+  g.fillStyle = 'rgba(255,250,235,0.12)';
+  g.beginPath(); g.moveTo(cx + S*0.08, cy - S*0.28); g.lineTo(cx + S*0.3, cy - S*0.16); g.lineTo(cx + S*0.2, cy - S*0.02); g.closePath(); g.fill();
+  /* speckles in the stone */
+  const specks = [[-0.2,0.1],[0.12,0.18],[0.25,0.05],[-0.05,0.26],[0.02,-0.05],[-0.28,0.22],[0.3,0.22]];
+  for (const [dx, dy] of specks) {
+    g.fillStyle = 'rgba(40,34,28,0.45)';
+    g.fillRect(cx + dx * S, cy + dy * S, 1.4, 1.4);
+  }
+  g.restore();
+  /* a crack */
+  g.strokeStyle = 'rgba(40,33,26,0.75)'; g.lineWidth = 1.2; g.lineCap = 'round';
+  g.beginPath(); g.moveTo(cx + S*0.18, cy - S*0.06); g.lineTo(cx + S*0.06, cy + S*0.08); g.lineTo(cx + S*0.12, cy + S*0.22); g.stroke();
+  g.beginPath(); g.moveTo(cx + S*0.06, cy + S*0.08); g.lineTo(cx - S*0.05, cy + S*0.12); g.stroke();
+  /* outline */
+  outline(); g.strokeStyle = '#3a342d'; g.lineWidth = 1.6; g.stroke();
+}
+
+/* a brilliant-cut diamond in profile: table, crown facets, pavilion to a point */
+function drawGemSprite(g, S) {
+  const cx = S / 2, w = S * 0.8;
+  const yT = S * 0.2, yG = S * 0.42, yC = S * 0.88;          /* table, girdle, culet */
+  const tl = cx - w * 0.24, tr = cx + w * 0.24;              /* table edges */
+  const gl = cx - w / 2,    gr = cx + w / 2;                 /* girdle edges */
+  const poly = (pts, col) => {
+    g.beginPath(); g.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]);
+    g.closePath(); g.fillStyle = col; g.fill();
+  };
+  /* crown */
+  poly([[gl, yG], [tl, yT], [cx - w*0.08, yG]], '#7fe6fb');
+  poly([[tl, yT], [tr, yT], [cx + w*0.08, yG], [cx - w*0.08, yG]], '#d9fbff');
+  poly([[tr, yT], [gr, yG], [cx + w*0.08, yG]], '#3fbfe8');
+  /* table glint */
+  poly([[tl + 2, yT + 1.5], [cx - 1, yT + 1.5], [cx - w*0.12, yG - 3]], 'rgba(255,255,255,0.85)');
+  /* pavilion: light on the left, deep blue on the right */
+  poly([[gl, yG], [cx - w*0.18, yG], [cx, yC]], '#4fd0f2');
+  poly([[cx - w*0.18, yG], [cx, yG], [cx, yC]], '#a7f1ff');
+  poly([[cx, yG], [cx + w*0.18, yG], [cx, yC]], '#2a9fd6');
+  poly([[cx + w*0.18, yG], [gr, yG], [cx, yC]], '#16679f');
+  /* facet edges */
+  g.strokeStyle = 'rgba(255,255,255,0.55)'; g.lineWidth = 0.8;
+  g.beginPath();
+  g.moveTo(gl, yG); g.lineTo(gr, yG);
+  g.moveTo(cx - w*0.08, yG); g.lineTo(tl, yT);
+  g.moveTo(cx + w*0.08, yG); g.lineTo(tr, yT);
+  g.moveTo(cx - w*0.18, yG); g.lineTo(cx, yC);
+  g.moveTo(cx + w*0.18, yG); g.lineTo(cx, yC);
+  g.moveTo(cx, yG); g.lineTo(cx, yC);
+  g.stroke();
+  /* outline */
+  g.beginPath();
+  g.moveTo(tl, yT); g.lineTo(tr, yT); g.lineTo(gr, yG); g.lineTo(cx, yC); g.lineTo(gl, yG); g.closePath();
+  g.strokeStyle = '#0d4f7c'; g.lineWidth = 1.4; g.lineJoin = 'round'; g.stroke();
+}
+
+/* a four-point twinkle */
+function sparkle(x, y, r, a) {
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.moveTo(x, y - r); ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.quadraticCurveTo(x, y, x, y + r); ctx.quadraticCurveTo(x, y, x - r, y);
+  ctx.quadraticCurveTo(x, y, x, y - r);
+  ctx.fill();
+  ctx.restore();
+}
+
+/* ---------------- the miner ----------------
+   Yellow hard hat with a headlamp, silver hair swept back and out from
+   under the brim, square light-brown glasses, a squinting smile with a
+   lopsided smirk, black jacket over a white T-shirt, and a pickaxe. */
+function drawPapmand(sx, sy, t) {
+  const u = TS / 36;
+  const walking = player.walkT < 0.22;
+  const joy = player.joyT > 0;
+  const f = player.face > 0 ? 1 : -1;                 /* which way he faces */
+  const stepA = walking ? Math.sin((player.walkT / 0.22) * Math.PI) : 0;
+  const leg = walking ? (player.stepN % 2 ? 1 : -1) : 0;
+  let bob = 0;
+  if (walking) bob = -stepA * 2 * u;
+  else if (joy) bob = -Math.abs(Math.sin(player.joyT * 16)) * 3 * u;
+  else bob = Math.sin(t * 2.4) * 0.5 * u;             /* breathing */
+  const X = v => sx + v * u, Y = v => sy + v * u + bob;
+  /* mirror horizontal positions so features turn with him */
+  const M = v => sx + (f > 0 ? v : 36 - v) * u;
+
+  const SKIN = '#efc2a0', SKIN_D = '#d9a07c', HAIR = '#c3bdb3', HAIR_D = '#8f887d',
+        JACKET = '#1f2228', JACKET_L = '#343841', HAT = '#f2c230', HAT_D = '#c7951c';
+
+  /* shadow */
+  ctx.fillStyle = 'rgba(0,0,0,0.32)';
+  ctx.beginPath(); ctx.ellipse(sx + TS/2, sy + 34.5*u, 10*u, 2.4*u, 0, 0, Math.PI*2); ctx.fill();
+
+  /* legs and boots */
+  ctx.fillStyle = '#2a3140';
+  ctx.fillRect(X(12) + leg * 1.5 * u, Y(29), 4.5*u, 4*u);
+  ctx.fillRect(X(19.5) - leg * 1.5 * u, Y(29), 4.5*u, 4*u);
+  ctx.fillStyle = '#5a3a1e';
+  ctx.fillRect(X(11) + leg * 1.5 * u, Y(32.5), 6.5*u, 2.5*u);
+  ctx.fillRect(X(18.5) - leg * 1.5 * u, Y(32.5), 6.5*u, 2.5*u);
+
+  /* body: black jacket, open over a white T-shirt */
+  ctx.fillStyle = JACKET;
+  ctx.beginPath(); ctx.roundRect(X(9), Y(19), 18*u, 11.5*u, 3*u); ctx.fill();
+  ctx.fillStyle = JACKET_L;                                        /* light catching one side */
+  ctx.fillRect(M(f > 0 ? 10 : 22), Y(20), 4*u, 9*u);
+  ctx.fillStyle = '#f4f4f2';                                       /* the T-shirt */
+  ctx.beginPath(); ctx.moveTo(X(15), Y(19)); ctx.lineTo(X(21), Y(19)); ctx.lineTo(X(20), Y(30)); ctx.lineTo(X(16), Y(30)); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#9da2aa'; ctx.lineWidth = 0.9*u;               /* collar and zip */
+  ctx.beginPath(); ctx.moveTo(X(15), Y(19)); ctx.lineTo(X(16), Y(30)); ctx.moveTo(X(21), Y(19)); ctx.lineTo(X(20), Y(30)); ctx.stroke();
+  ctx.fillStyle = '#4a4f58';                                       /* backpack strap */
+  ctx.fillRect(M(f > 0 ? 11 : 22), Y(19), 3*u, 11*u);
+
+  /* arms: black sleeves, hands out of the cuffs */
+  const arm = walking ? leg * 3 : Math.sin(t * 2.4) * 0.7;
+  ctx.strokeStyle = JACKET; ctx.lineWidth = 3.6*u; ctx.lineCap = 'round';
+  ctx.beginPath();
+  let hb, hf;                                                      /* back hand, front hand */
+  if (joy) {
+    ctx.moveTo(M(9.5), Y(21));  ctx.lineTo(M(4), Y(12));  hb = [M(4), Y(11)];
+    ctx.moveTo(M(26.5), Y(21)); ctx.lineTo(M(29), Y(12)); hf = [M(29), Y(11)];
+  } else {
+    ctx.moveTo(M(9.5), Y(21));  ctx.lineTo(M(5) + arm*u, Y(28)); hb = [M(5) + arm*u, Y(28.5)];
+    ctx.moveTo(M(26.5), Y(21)); ctx.lineTo(M(26), Y(25));        hf = [M(26), Y(25.5)];
+  }
+  ctx.stroke();
+
+  /* the pickaxe, gripped in the front hand: tilted ahead of him, it
+     chops as he walks and goes up over his head when he cheers */
+  const chop = walking ? stepA * 0.55 : Math.sin(t * 2.4) * 0.04;
+  ctx.save();
+  ctx.translate(hf[0], hf[1]);
+  ctx.rotate(joy ? f * 0.15 : f * (0.55 + chop));
+  ctx.strokeStyle = '#8a5a2b'; ctx.lineWidth = 2.2*u; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(0, 3*u); ctx.lineTo(0, -13*u); ctx.stroke();       /* handle */
+  ctx.fillStyle = '#a7b0ba'; ctx.strokeStyle = '#4b525b'; ctx.lineWidth = 1*u;
+  ctx.beginPath();                                                               /* iron head */
+  ctx.moveTo(-7.5*u, -10.5*u); ctx.quadraticCurveTo(0, -16.5*u, 7.5*u, -10.5*u);
+  ctx.quadraticCurveTo(0, -13.5*u, -7.5*u, -10.5*u);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.restore();
+
+  ctx.fillStyle = SKIN;
+  for (const [hx, hy] of [hb, hf]) { ctx.beginPath(); ctx.arc(hx, hy, 1.8*u, 0, Math.PI*2); ctx.fill(); }
+
+  /* neck and head */
+  ctx.fillStyle = SKIN_D;
+  ctx.fillRect(X(15.5), Y(16.5), 5*u, 3*u);
+  ctx.fillStyle = SKIN;
+  ctx.beginPath(); ctx.roundRect(X(9.5), Y(5.5), 17*u, 13.5*u, [3*u, 3*u, 6*u, 6*u]); ctx.fill();
+  ctx.beginPath(); ctx.arc(M(9.5), Y(12.5), 1.8*u, 0, Math.PI*2); ctx.fill();   /* ear */
+
+  /* silver hair: sides under the brim, and the swept fringe */
+  ctx.fillStyle = HAIR;
+  ctx.beginPath(); ctx.roundRect(M(f > 0 ? 8.5 : 24.5), Y(5), 3*u, 7*u, 1.5*u); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(M(f > 0 ? 24.5 : 8.5), Y(5), 3*u, 6*u, 1.5*u); ctx.fill();
+  ctx.beginPath();                                  /* the fringe, swept up and over */
+  ctx.moveTo(M(9.5), Y(9.5));
+  ctx.quadraticCurveTo(M(11), Y(6), M(17), Y(6.2));
+  ctx.quadraticCurveTo(M(23), Y(6.2), M(27), Y(7.5));
+  ctx.lineTo(M(26.5), Y(8.4));
+  ctx.quadraticCurveTo(M(20), Y(7.6), M(15), Y(8.6));
+  ctx.quadraticCurveTo(M(12), Y(9.2), M(10.6), Y(10.6));
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = HAIR_D; ctx.lineWidth = 0.7*u;
+  ctx.beginPath(); ctx.moveTo(M(11), Y(8.6)); ctx.quadraticCurveTo(M(16), Y(6.9), M(25.5), Y(7.6)); ctx.stroke();
+  /* a tuft escaping at the back of the hat */
+  ctx.fillStyle = HAIR;
+  ctx.beginPath();
+  ctx.moveTo(M(8.6), Y(5)); ctx.quadraticCurveTo(M(5.5), Y(3.5), M(6.5), Y(7.5)); ctx.lineTo(M(9), Y(8)); ctx.closePath(); ctx.fill();
+
+  /* hard hat, worn a touch back so the hair shows */
+  ctx.fillStyle = HAT;
+  ctx.beginPath(); ctx.arc(X(18), Y(4.6), 9*u, Math.PI, 0); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = HAT_D;
+  ctx.beginPath(); ctx.roundRect(X(7), Y(3.8), 22*u, 2.4*u, 1.2*u); ctx.fill();       /* brim */
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.beginPath(); ctx.ellipse(M(14.5), Y(0.2), 3*u, 1.4*u, -0.4*f, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = HAT_D; ctx.lineWidth = 1*u;
+  ctx.beginPath(); ctx.moveTo(X(18), Y(-4.3)); ctx.lineTo(X(18), Y(3.7)); ctx.stroke(); /* ridge */
+  /* headlamp, glowing */
+  const lx0 = M(22.5), ly0 = Y(1.2);
+  ctx.fillStyle = 'rgba(255,240,170,0.28)';
+  ctx.beginPath(); ctx.arc(lx0, ly0, 5*u, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#5b5f66';
+  ctx.beginPath(); ctx.arc(lx0, ly0, 2.6*u, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#fff4c2';
+  ctx.beginPath(); ctx.arc(lx0, ly0, 1.7*u, 0, Math.PI*2); ctx.fill();
+
+  /* eyes: a friendly squint behind the glasses, looking where he is going */
+  let lx = player.lookX, ly = player.lookY;
+  if (!walking && player.idleT > 3) { lx = Math.sin(t * 0.9); ly = Math.cos(t * 0.6) * 0.5; }
+  const eyeY = Y(11);
+  const eyes = [M(14.5), M(21.5)];
+  ctx.strokeStyle = '#2d241e'; ctx.fillStyle = '#2d241e'; ctx.lineCap = 'round';
+  for (const ex of eyes) {
+    if (player.blink > 0 || joy) {
+      ctx.lineWidth = 1.2*u;
+      ctx.beginPath(); ctx.arc(ex, eyeY + 1*u, 1.8*u, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.ellipse(ex + lx * 0.8*u, eyeY + ly * 0.5*u, 1.25*u, 0.9*u, 0, 0, Math.PI*2); ctx.fill();
+      ctx.lineWidth = 0.8*u;                                     /* squint line above */
+      ctx.beginPath(); ctx.moveTo(ex - 2*u, eyeY - 1.4*u); ctx.quadraticCurveTo(ex, eyeY - 2.2*u, ex + 2*u, eyeY - 1.4*u); ctx.stroke();
+    }
+  }
+  /* smile crinkles at the corners */
+  ctx.strokeStyle = 'rgba(150,90,60,0.55)'; ctx.lineWidth = 0.6*u;
+  ctx.beginPath();
+  ctx.moveTo(M(10.8), Y(11.6)); ctx.lineTo(M(10), Y(12.4));
+  ctx.moveTo(M(25.2), Y(11.6)); ctx.lineTo(M(26), Y(12.4));
+  ctx.stroke();
+
+  /* the glasses: square, translucent light-brown frames */
+  ctx.strokeStyle = '#a8865e'; ctx.lineWidth = 1.3*u;
+  ctx.fillStyle = 'rgba(255,255,255,0.13)';
+  for (const ex of eyes) {
+    ctx.beginPath(); ctx.roundRect(ex - 3.4*u, eyeY - 3*u, 6.8*u, 5.6*u, 1.4*u); ctx.fill(); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(eyes[0] + (f > 0 ? 3.4 : -3.4)*u, eyeY - 1*u); ctx.lineTo(eyes[1] - (f > 0 ? 3.4 : -3.4)*u, eyeY - 1*u); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(M(10.6), eyeY - 1.5*u); ctx.lineTo(M(9.3), eyeY - 1.2*u); ctx.stroke();   /* arm to the ear */
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 0.7*u;                                     /* glint */
+  ctx.beginPath(); ctx.moveTo(eyes[1] + 0.8*u, eyeY - 2*u); ctx.lineTo(eyes[1] + 2.2*u, eyeY - 2*u); ctx.stroke();
+
+  /* nose */
+  ctx.fillStyle = '#e6a88a';
+  ctx.beginPath(); ctx.ellipse(M(19), Y(14), 1.7*u, 1.4*u, 0, 0, Math.PI*2); ctx.fill();
+  /* warm cheeks */
+  ctx.fillStyle = 'rgba(225,110,95,0.28)';
+  ctx.beginPath(); ctx.ellipse(M(13), Y(14.8), 2*u, 1.2*u, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(M(23.5), Y(14.8), 2*u, 1.2*u, 0, 0, Math.PI*2); ctx.fill();
+
+  /* mouth: a closed, lopsided smirk; a proper grin for a diamond */
+  ctx.strokeStyle = '#8c4a3c'; ctx.lineWidth = 1.2*u; ctx.lineCap = 'round';
+  if (joy) {
+    ctx.fillStyle = '#6e2b25';
+    ctx.beginPath(); ctx.arc(X(18.5), Y(16.2), 2.6*u, 0, Math.PI); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(X(16.6), Y(16.2), 3.8*u, 0.9*u);
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(M(15.8), Y(16.6));
+    ctx.quadraticCurveTo(M(18.5), Y(17.6), M(21.6), Y(15.8));   /* rises on one side */
+    ctx.stroke();
+  }
+}
+
+function draw(dt) {
+  const t = performance.now()/1000;
+  ctx.fillStyle = '#000008';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.translate(0, HUD);
+  ctx.beginPath(); ctx.rect(0, 0, VW, VH); ctx.clip();
+  ctx.translate(-Math.round(cam.x), -Math.round(cam.y));
+
+  const x0 = clamp(Math.floor(cam.x/TS)-1, 0, CW), x1 = clamp(Math.ceil((cam.x+VW)/TS)+1, 0, CW);
+  const y0 = clamp(Math.floor(cam.y/TS)-1, 0, CH), y1 = clamp(Math.ceil((cam.y+VH)/TS)+1, 0, CH);
+  for (let y=y0;y<y1;y++) for (let x=x0;x<x1;x++) {
+    const v = grid[idx(x,y)];
+    if (v !== T.EMPTY) drawTile(v, x*TS, y*TS, x, y, t);
+  }
+
+  if (player.alive && (game.state === 'play' || game.state === 'clear')) {
+    drawPapmand(player.x*TS, player.y*TS, t);
+  }
+
+  ctx.restore();
+
+  /* explosion flash */
+  if (game.flash > 0) {
+    ctx.fillStyle = 'rgba(255,220,150,' + (game.flash*1.6) + ')';
+    ctx.fillRect(0, HUD, VW, VH);
+  }
+
+  /* ---------------- HUD ---------------- */
+  ctx.fillStyle = '#10131c';
+  ctx.fillRect(0, 0, W, HUD);
+  ctx.fillStyle = '#20242e';
+  ctx.fillRect(0, HUD-2, W, 2);
+
+  /* diamond counter */
+  const quota = game.got >= game.need;
+  ctx.fillStyle = quota ? '#ffd21f' : '#50dcff';
+  ctx.beginPath();
+  ctx.moveTo(16, 12); ctx.lineTo(24, 20); ctx.lineTo(16, 28); ctx.lineTo(8, 20);
+  ctx.closePath(); ctx.fill();
+  text(game.got + '/' + game.need, 32, 20, 14, quota ? '#ffd21f' : '#ffffff', 'left');
+
+  /* time */
+  const tCol = game.time < 15 ? (Math.floor(t*4)%2 ? '#ff2244' : '#ff8c1a') : '#ffffff';
+  text('TID ' + Math.ceil(game.time), W/2, 20, 13, tCol);
+
+  /* score */
+  text(('' + game.score).padStart(6,'0'), W - 12, 20, 13, '#ffffff', 'right');
+
+  /* second row: cave, lives */
+  text('GRUBE ' + game.cave, 12, 39, 10, '#39d5ff', 'left');
+  for (let i=0;i<game.lives;i++) {
+    const hx = W - 13 - i*16;
+    ctx.fillStyle = '#f2c230';
+    ctx.beginPath(); ctx.arc(hx, 43, 6, Math.PI, 0); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#c7951c';
+    ctx.fillRect(hx - 8, 42, 16, 3);
+    ctx.fillStyle = '#fff4c2';
+    ctx.beginPath(); ctx.arc(hx + 2, 39.5, 1.5, 0, Math.PI*2); ctx.fill();
+  }
+  text('HI ' + game.hi, W/2, 39, 10, '#c9d4e0');
+
+  /* ---------------- the control pad ---------------- */
+  ctx.fillStyle = '#0a0714';
+  ctx.fillRect(0, H - DPAD_H, W, DPAD_H);
+  ctx.fillStyle = '#20242e';
+  ctx.fillRect(0, H - DPAD_H, W, 2);
+
+  const held = heldDir();
+  for (const b of DPAD) {
+    const on = held && held[0] === b.dir[0] && held[1] === b.dir[1];
+    const x = b.cx - BTN/2, y = b.cy - BTN/2;
+    ctx.fillStyle = on ? '#3f6b46' : '#1c2436';
+    ctx.beginPath(); ctx.roundRect(x, y, BTN, BTN, 11); ctx.fill();
+    ctx.strokeStyle = on ? '#7cf29a' : '#39415c';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(x + 1, y + 1, BTN - 2, BTN - 2, 10); ctx.stroke();
+    ctx.lineWidth = 1;
+    /* the arrowhead */
+    const a = 13, cx2 = b.cx, cy2 = b.cy;
+    ctx.fillStyle = on ? '#ffffff' : '#c9d4e0';
+    ctx.beginPath();
+    if (b.dir[1] === -1) { ctx.moveTo(cx2, cy2 - a); ctx.lineTo(cx2 + a, cy2 + a*0.7); ctx.lineTo(cx2 - a, cy2 + a*0.7); }
+    if (b.dir[1] ===  1) { ctx.moveTo(cx2, cy2 + a); ctx.lineTo(cx2 + a, cy2 - a*0.7); ctx.lineTo(cx2 - a, cy2 - a*0.7); }
+    if (b.dir[0] === -1) { ctx.moveTo(cx2 - a, cy2); ctx.lineTo(cx2 + a*0.7, cy2 + a); ctx.lineTo(cx2 + a*0.7, cy2 - a); }
+    if (b.dir[0] ===  1) { ctx.moveTo(cx2 + a, cy2); ctx.lineTo(cx2 - a*0.7, cy2 + a); ctx.lineTo(cx2 - a*0.7, cy2 - a); }
+    ctx.closePath(); ctx.fill();
+  }
+
+  /* once the quota is met, point the way to an exit that is off-screen */
+  if (game.state === 'play' && game.got >= game.need) {
+    const ex = exitPos.x * TS + TS/2 - cam.x, ey = exitPos.y * TS + TS/2 - cam.y + HUD;
+    const off = ex < 0 || ex > VW || ey < HUD || ey > HUD + VH;
+    if (off && Math.floor(performance.now()/350) % 2 === 0) {
+      const mx2 = clamp(ex, 22, VW - 22), my2 = clamp(ey, HUD + 22, HUD + VH - 22);
+      const ang = Math.atan2(ey - my2, ex - mx2);
+      ctx.save();
+      ctx.translate(mx2, my2);
+      ctx.rotate(ang);
+      ctx.fillStyle = '#ffd21f';
+      ctx.beginPath();
+      ctx.moveTo(14, 0); ctx.lineTo(-8, 9); ctx.lineTo(-8, -9);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  if (game.msgTimer > 0 && game.msg) {
+    ctx.globalAlpha = clamp(game.msgTimer, 0, 1);
+    text(game.msg, W/2, H*0.3, 15, '#ffd21f');
+    ctx.globalAlpha = 1;
+  }
+
+  if (game.state === 'title') {
+    ctx.fillStyle = 'rgba(0,0,10,0.6)';
+    ctx.fillRect(0, 0, W, H);
+    text('PAPMAND', W/2, H*0.22, 42, '#c99a5b');
+    text('DASH', W/2, H*0.29, 34, '#50dcff');
+    /* mini legend */
+    drawTile(T.GEM, W/2-88, H*0.38, 1, 1, t);   text('saml diamanter', W/2-58, H*0.38+11, 11, '#50dcff', 'left');
+    drawTile(T.ROCK, W/2-88, H*0.44, 1, 1, t);  text('pas på faldende sten', W/2-58, H*0.44+11, 11, '#c9d4e0', 'left');
+    drawTile(T.FLY, W/2-88, H*0.50, 2, 2, t);   text('undgå væsnerne', W/2-58, H*0.50+11, 11, '#ff8c1a', 'left');
+    drawTile(T.EXITO, W/2-88, H*0.56, 1, 1, t); text('find den blinkende udgang', W/2-58, H*0.56+11, 11, '#ffd21f', 'left');
+    if (Math.floor(performance.now()/500) % 2 === 0)
+      text('TRYK FOR AT STARTE', W/2, H*0.68, 16, '#ffffff');
+    text('brug pilene forneden', W/2, H*0.75, 11, '#c9d4e0');
+    text('du ser kun en del af grotten ad gangen', W/2, H*0.79, 10, '#8f88a8');
+    text('lilla sommerfugle bliver til diamanter…', W/2, H*0.80, 10, '#c86bff');
+  }
+
+  if (game.state === 'gameover') {
+    ctx.fillStyle = 'rgba(0,0,10,0.6)';
+    ctx.fillRect(0, 0, W, H);
+    text('GAME OVER', W/2, H*0.4, 28, '#ff2244');
+    text('SCORE  ' + game.score, W/2, H*0.48, 16, '#ffffff');
+    text('GRUBE ' + game.cave, W/2, H*0.53, 12, '#39d5ff');
+    if (game.score >= game.hi) text('NY REKORD!', W/2, H*0.58, 13, '#ffd21f');
+    if (Math.floor(performance.now()/500) % 2 === 0)
+      text('TRYK FOR AT PRØVE IGEN', W/2, H*0.66, 14, '#ffffff');
+  }
+}
+
+/* ---------------- loop ---------------- */
+genCave(1);          /* background for the title screen */
+game.state = 'title';
+let last = performance.now();
+function loop(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.05) dt = 0.05;
+  update(dt);
+  draw(dt);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
