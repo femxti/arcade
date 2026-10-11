@@ -201,27 +201,27 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
   const OBW = 58;
   const LEVELS = [
     { name: 'Level 1', title: 'The Purple Cave', at: 0, tip: '', spiders: 0, owlEvery: 99, suitor: false, speed: 1.9, gap: 215, spacing: 340, wobble: 110,
-      beeFrom: 6, beeEvery: 5, beeChance: 0.4, owls: false,
+      beeFrom: 6, beeEvery: 5, beeChance: 0.4, owls: false, crumble: 0.07,
       pal: { bg: ['#15121f', '#231d36', '#130f1c'], far: ['#201b31', '#2a2340'], rock: ['#4c4268', '#6d6092', '#3a3252'],
              line: '#2a2340', edge: '#342c4c', gem: '111,216,176' } },
     { name: 'Level 2', title: 'The Glowing Grotto', at: 20, tip: 'watch out for the Evil Owl', spiders: 0, owlEvery: 5, suitor: false, speed: 2.3, gap: 188, spacing: 300, wobble: 150,
-      beeFrom: 2, beeEvery: 3, beeChance: 0.5, owls: true,
+      beeFrom: 2, beeEvery: 3, beeChance: 0.5, owls: true, crumble: 0.08,
       pal: { bg: ['#07181c', '#0f3137', '#061114'], far: ['#0c2428', '#133639'], rock: ['#2f5f63', '#4b8a88', '#244a4d'],
              line: '#0b2226', edge: '#1b3f43', gem: '255,138,190' } },
     { name: 'Level 3', title: "The Spider's Lair", at: 45, tip: 'poisonous spiders hang from the rocks', spiders: 0.4, owlEvery: 4, suitor: false,
       speed: 2.6, gap: 178, spacing: 285, wobble: 165,
-      beeFrom: 2, beeEvery: 3, beeChance: 0.55, owls: true,
+      beeFrom: 2, beeEvery: 3, beeChance: 0.55, owls: true, crumble: 0.09,
       pal: { bg: ['#1a0d0f', '#331519', '#11080a'], far: ['#291115', '#3b1b20'], rock: ['#5a3a3e', '#80565a', '#43292c'],
              line: '#1f0e10', edge: '#3c2327', gem: '170,255,110' } },
     { name: 'Level 4', title: 'The Moonlit Hall', at: 75, tip: 'Frida wants a kiss. Dodge her!', spiders: 0.3, owlEvery: 5, suitor: true,
       speed: 2.8, gap: 172, spacing: 275, wobble: 170,
-      beeFrom: 3, beeEvery: 4, beeChance: 0.5, owls: true,
+      beeFrom: 3, beeEvery: 4, beeChance: 0.5, owls: true, crumble: 0.12,
       pal: { bg: ['#070b20', '#121b4c', '#050817'], far: ['#0c1436', '#14204e'], rock: ['#3b4577', '#5c69a6', '#2c345c'],
              line: '#0a0f2a', edge: '#1e2758', gem: '255,170,215' } },
     { name: 'Level 5', title: "Boss: The Hawk's Nest", at: 105, tip: 'dodge 10 speedy hawks!', boss: true,
       spiders: 0, owlEvery: 99, suitor: false, owls: false,
       speed: 2.2, gap: 210, spacing: 380, wobble: 110,
-      beeFrom: 9999, beeEvery: 99, beeChance: 0,
+      beeFrom: 9999, beeEvery: 99, beeChance: 0, crumble: 0.06,
       pal: { bg: ['#1c0a06', '#3d170b', '#130604'], far: ['#2c0f08', '#43190d'], rock: ['#6b3a26', '#9a5a3a', '#4f2a1b'],
              line: '#1e0b05', edge: '#47210f', gem: '255,180,80' } }
   ];
@@ -239,6 +239,8 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
 
   let state = 'menu'; // menu | play | over
   let fires = [], hawks = [], hawkT = 0, hawksHit = 0, winT = 0, confetti = [];
+  const ROCK_G = 0.3; // gravity for falling stalactites: slower than real, so kids can react
+  let rocks = [];   // stalactites that have snapped off and are on their way down
   let kissT = 0, poisoned = 0, edgeCd = 0, suitors = [], suitorT = 0;
   let bat, obs, moths, bananas, flies, bees, owls, sinceBanana, sinceBee, sinceOwl, made, level, P, speed, passed, banner, flash, parts, rings, score, lives, invuln, t, scrollX, shake;
 
@@ -246,6 +248,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
     bat = { x: 170, y: H * 0.45, vy: 0, flapT: 0 };
     obs = []; moths = []; bananas = []; flies = []; bees = []; owls = []; sinceBanana = 0; sinceBee = 0; sinceOwl = 0; made = 0;
     level = 0; P = LEVELS[0]; speed = P.speed; passed = 0; banner = null; flash = 0; parts = []; rings = [];
+    rocks = [];
     poisoned = 0; edgeCd = 0; suitors = []; suitorT = 0; fires = []; hawks = []; hawkT = 0; hawksHit = 0; winT = 0; confetti = []; score = 0; lives = LIVES; invuln = 0; t = 0; scrollX = 0; shake = 0;
     for (let i = 0; i < 3; i++) addObstacle(W + 260 + i * P.spacing);
     updateHud();
@@ -262,7 +265,12 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
     const seed = Math.random() * 1000;
     const spider = made > 1 && Math.random() < P.spiders
       ? { ph: Math.random() * 6, hit: false, lift: 0 } : null;
-    obs.push({ x, gy, gap, passed: false, seed, drip: !spider && Math.random() < 0.2, spider });
+    // a brittle stalactite: it will crack and drop when Filip comes near.
+    // Its gap is kept empty (no moth, banana or butterfly), so nothing blocks the fall.
+    // The 3rd rock of every level always crumbles, so it's seen early.
+    const brittle = !spider && (made === 2 || (made > 2 && Math.random() < (P.crumble || 0)));
+    obs.push({ x, gy, gap, passed: false, seed, drip: !spider && Math.random() < 0.2, spider,
+               brittle, crackT: 0, fallen: false });
     // a fat killer bee hovers in the open space before this formation (never in the first ones)
     // rare: none in the first 6 formations, then at least 5 formations between bees
     made++; sinceBee++; sinceOwl++;
@@ -275,6 +283,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
       sinceOwl = 0;
       owls.push({ x: midX, base: midY, ph: Math.random() * 6, hit: false, hooted: false });
     }
+    if (brittle) return; // leave the gap under a brittle stalactite empty
     sinceBanana++;
     // a banana every 3-5 formations, tucked into the gap
     if (sinceBanana >= 3 && Math.random() < 0.45 || sinceBanana >= 5) {
@@ -292,7 +301,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
   // half-width of a formation at vertical position y (0 = outside)
   function halfWidth(o, y) {
     const top = o.gy - o.gap / 2, bot = o.gy + o.gap / 2, tip = 46, hw = OBW / 2;
-    if (y <= top) return y > top - tip ? hw * (top - y) / tip : hw;
+    if (y <= top) return o.fallen ? 0 : (y > top - tip ? hw * (top - y) / tip : hw);
     if (y >= bot) return y < bot + tip ? hw * (y - bot) / tip : hw;
     return 0;
   }
@@ -302,6 +311,19 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
     const top = o.gy - o.gap / 2;
     const reach = o.gap * (0.3 + 0.25 * Math.sin(o.spider.ph)) * (1 - o.spider.lift);
     return { x: o.x + OBW / 2, y: top + 6 + reach, top };
+  }
+
+  // A stalactite stays put if anything useful or alive is underneath it.
+  // Dropping a rock through a butterfly would be unfair on both of them.
+  function clearBelow(o) {
+    const cx = o.x + OBW / 2, top = o.gy - o.gap / 2, span = OBW * 1.1;
+    const under = (x, y) => Math.abs(x - cx) < span && y > top - 10;
+    for (const m of moths)   if (!m.got && under(m.x, m.y)) return false;
+    for (const b of bananas) if (!b.got && under(b.x, b.y)) return false;
+    for (const f of flies)   if (!f.got && under(f.x, f.y)) return false;
+    for (const b of bees)    if (!b.stung && under(b.x, b.base)) return false;
+    for (const w of owls)    if (!w.hit && under(w.x, w.base)) return false;
+    return true;
   }
 
   function hitsObstacle(o) {
@@ -362,6 +384,8 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
     },
     mwah: () => { tone(900, 1400, 0.12, 'sine', 0.08); setTimeout(() => tone(1300, 700, 0.18, 'sine', 0.08), 130); },
     hoot: () => { tone(420, 380, 0.25, 'sine', 0.1); setTimeout(() => tone(400, 340, 0.4, 'sine', 0.1), 320); },
+    creak: () => tone(140, 90, 0.5, 'sawtooth', 0.05),
+    crash: () => { tone(160, 50, 0.3, 'square', 0.1); setTimeout(() => tone(90, 40, 0.25, 'sawtooth', 0.07), 90); },
     hit: () => tone(220, 60, 0.3, 'sawtooth', 0.12),
     over: () => { tone(440, 110, 0.6, 'triangle', 0.12); }
   };
@@ -422,7 +446,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
   let bride = { x: W + 60, y: H / 2, ph: 0, happy: true };
   function winGame() {
     state = 'win'; P = WEDDING; flash = 50;
-    obs = []; moths = []; bananas = []; flies = []; bees = []; owls = []; suitors = []; hawks = []; fires = [];
+    obs = []; moths = []; bananas = []; flies = []; bees = []; owls = []; suitors = []; hawks = []; fires = []; rocks = [];
     bride = { x: W + 60, y: H / 2 - 40, ph: 0, happy: true };
     invuln = 0; poisoned = 0; kissT = 0;
     if (score > best) { best = score; try { localStorage.setItem('filip-best', best); } catch (e) {} }
@@ -468,6 +492,33 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
           o.passed = true; score++; passed++; sfx.point(); updateHud();
           if (level < LEVELS.length - 1 && passed >= LEVELS[level + 1].at) levelUp();
         }
+        // brittle stalactites crack as Filip approaches, then let go
+        if (o.brittle && !o.fallen) {
+          const cx = o.x + OBW / 2, lead = cx - bat.x;
+          // Time the drop so the rock is partway down the gap just as Filip
+          // reaches it: he has to read where it is and fly above or below.
+          if (o.dropFrac === undefined) o.dropFrac = 0.6 + Math.random() * 0.25; // rock is in the lower part of the gap when Filip gets there, so flying high gets him past
+          const fallDist = o.gap + 18;
+          const tFall = Math.sqrt(2 * o.dropFrac * fallDist / ROCK_G);   // frames to reach that point
+          const warn = 110;                                              // frames of cracking first
+          if (o.crackT === 0 && lead > 0 && lead / speed <= tFall + warn && clearBelow(o)) {
+            o.crackT = 1; sfx.creak();
+          } else if (o.crackT > 0) {
+            o.crackT++;
+            if (o.crackT > warn) {
+              o.fallen = true;
+              rocks.push({ x: cx, y: o.gy - o.gap / 2 - 18, vy: 0, rot: 0,
+                           vr: (Math.random() - 0.5) * 0.12, seed: o.seed,
+                           land: o.gy + o.gap / 2 });
+              sfx.crash();
+              shake = Math.max(shake, 6);
+              for (let i = 0; i < 10; i++)
+                parts.push({ x: cx + (Math.random() - .5) * 30, y: o.gy - o.gap / 2 - 30,
+                             vx: (Math.random() - .5) * 2, vy: Math.random() * 1.5,
+                             life: 30, c: P.pal.rock[1] });
+            }
+          }
+        }
         if (invuln === 0 && hitsObstacle(o)) hurt();
         const sp = o.spider;
         if (sp) {
@@ -480,6 +531,25 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
         }
       }
       if (obs[0].x < -OBW - 10) { obs.shift(); addObstacle(obs[obs.length - 1].x + P.spacing); }
+
+      // falling rocks: they drift left with the cave and gather speed downward
+      for (const r of rocks) {
+        r.x -= speed;
+        r.vy = Math.min(7, r.vy + ROCK_G);
+        r.y += r.vy;
+        r.rot += r.vr;
+        if (invuln === 0 && !r.done &&
+            Math.abs(r.x - bat.x) < 13 + HIT_R && Math.abs(r.y - bat.y) < 17 + HIT_R) {
+          r.done = true; hurt('Rock!');
+        }
+        if (!r.done && r.y > r.land) {        // it shatters on the stalagmite below
+          r.done = true; sfx.crash(); shake = Math.max(shake, 7);
+          for (let i = 0; i < 16; i++)
+            parts.push({ x: r.x, y: r.land, vx: (Math.random() - .5) * 6, vy: -Math.random() * 4,
+                         life: 34, c: i % 2 ? P.pal.rock[1] : P.pal.rock[2] });
+        }
+      }
+      rocks = rocks.filter(r => !r.done && r.x > -40 && r.y < H + 40);
 
       for (const m of moths) {
         m.x -= speed; m.ph += 0.12;
@@ -681,11 +751,49 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
       ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 4;
       ctx.beginPath(); ctx.moveTo(cx - hw * 0.45, from); ctx.lineTo(cx - hw * 0.45, endBody); ctx.stroke();
     };
-    jag(0, top, 1);   // stalactite from ceiling
+    if (!o.fallen) {
+      // a cracking stalactite trembles, and the trembling grows
+      const sh = o.crackT > 0 ? Math.sin(o.crackT * 1.7) * (1 + Math.min(o.crackT, 60) / 15) : 0;
+      ctx.save();
+      ctx.translate(sh, 0);
+      jag(0, top, 1);   // stalactite from ceiling
+      if (o.crackT > 0) {
+        // a crack opens across the root
+        const cy = Math.max(CEIL + 6, top - 52);
+        ctx.strokeStyle = 'rgba(10,6,16,0.9)'; ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(cx - hw + 2, cy);
+        ctx.lineTo(cx - hw * 0.4, cy - 5);
+        ctx.lineTo(cx, cy + 4);
+        ctx.lineTo(cx + hw * 0.45, cy - 4);
+        ctx.lineTo(cx + hw - 2, cy + 2);
+        ctx.stroke();
+        // a dotted warning line shows the path the rock will fall
+        const blink = 0.5 + 0.3 * Math.sin(o.crackT / 3);
+        ctx.save(); ctx.translate(-sh, 0);
+        ctx.strokeStyle = `rgba(255,90,70,${blink})`; ctx.lineWidth = 3; ctx.setLineDash([6, 8]);
+        ctx.beginPath(); ctx.moveTo(cx, top + 6); ctx.lineTo(cx, o.gy + o.gap / 2 - 4); ctx.stroke();
+        ctx.setLineDash([]); ctx.restore();
+        // grit trickling from the crack
+        if (o.crackT % 4 === 0)
+          parts.push({ x: cx + (Math.random() - .5) * hw, y: cy, vx: 0, vy: 0.5, life: 22, c: P.pal.rock[1] });
+      }
+      ctx.restore();
+    } else {
+      // a stub is left on the ceiling where it broke away
+      ctx.fillStyle = P.pal.rock[2];
+      const sy = Math.max(CEIL + 6, top - 52);
+      ctx.beginPath();
+      ctx.moveTo(cx - hw, 0); ctx.lineTo(cx + hw, 0);
+      ctx.lineTo(cx + hw - 4, sy + 2); ctx.lineTo(cx + hw * 0.3, sy - 6);
+      ctx.lineTo(cx - hw * 0.2, sy + 4); ctx.lineTo(cx - hw + 3, sy - 3);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = P.pal.line; ctx.lineWidth = 2; ctx.stroke();
+    }
     jag(H, bot, -1);  // stalagmite from floor
 
     // water drip from the stalactite tip
-    if (o.drip) {
+    if (o.drip && !o.fallen) {
       const dp = ((t + o.seed * 10) % 150) / 150;
       if (dp < 0.6) {
         const k = dp / 0.6;
@@ -693,6 +801,33 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
         ctx.beginPath(); ctx.arc(cx, top + 4 + k * k * (o.gap - 10), 2.2, 0, 7); ctx.fill();
       }
     }
+  }
+
+  function drawRock(r) {
+    ctx.save();
+    ctx.translate(r.x, r.y);
+    ctx.rotate(r.rot);
+    const hw = OBW / 2 - 4;
+    const g = ctx.createLinearGradient(-hw, 0, hw, 0);
+    const rc = P.pal.rock;
+    g.addColorStop(0, rc[0]); g.addColorStop(0.45, rc[1]); g.addColorStop(1, rc[2]);
+    ctx.beginPath();
+    // a broken-off stalactite: flat jagged top, pointed tip below
+    ctx.moveTo(-hw, -22);
+    ctx.lineTo(-hw * 0.4, -28);
+    ctx.lineTo(hw * 0.2, -21);
+    ctx.lineTo(hw, -27);
+    ctx.lineTo(hw * 0.6, 4);
+    ctx.lineTo(hw * 0.25, 18);
+    ctx.lineTo(0, 30);
+    ctx.lineTo(-hw * 0.3, 16);
+    ctx.lineTo(-hw * 0.7, 2);
+    ctx.closePath();
+    ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = P.pal.line; ctx.lineWidth = 2; ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(-hw * 0.4, -20); ctx.lineTo(-hw * 0.15, 12); ctx.stroke();
+    ctx.restore();
   }
 
   function drawSpider(o) {
@@ -1088,7 +1223,10 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
     ctx.save();
     if (shake && !reduced) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
     drawBackground();
-    if (state === 'play' || state === 'over') for (const o of obs) { drawFormation(o); if (o.spider) drawSpider(o); }
+    if (state === 'play' || state === 'over') {
+      for (const o of obs) { drawFormation(o); if (o.spider) drawSpider(o); }
+      for (const r of rocks) drawRock(r);
+    }
     for (const m of moths) drawMoth(m);
     for (const b of bananas) drawBanana(b);
     for (const f of flies) drawButterfly(f);
