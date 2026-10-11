@@ -18,7 +18,7 @@
 "use strict";
 /* ============================================================
    PAPMAND DASH — a Boulder Dash-style digger for mobile
-   Hold & drag = joystick (step in that direction)
+   Arrow pad at the bottom = step in that direction
    Dig dirt · collect diamonds · dodge falling boulders
    Fill the quota, then find the flashing exit
    ============================================================ */
@@ -76,9 +76,21 @@ const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
 
 /* ---------------- tiles ---------------- */
 const T = { EMPTY:0, DIRT:1, BRICK:2, STEEL:3, ROCK:4, GEM:5, EXITC:6, EXITO:7, FLY:8, BFLY:9, EXPL:10 };
-const TS = 22;                       /* tile size on screen */
-const CW = 34, CH = 26;              /* cave dimensions */
-const HUD = 50;
+const TS = 36;                       /* tile size on screen */
+const CW = 40, CH = 24;              /* cave dimensions: far wider than the window */
+const HUD = 50;                      /* score bar along the top */
+const DPAD_H = 178;                  /* control pad along the bottom */
+const VW = W, VH = H - HUD - DPAD_H; /* the slice of cave you actually see */
+
+/* the pad: four arrows in a cross, generous enough for a thumb */
+const BTN = 52, GAP = 56;
+const PAD_CX = W / 2, PAD_CY = H - DPAD_H / 2 + 2;
+const DPAD = [
+  { dir: [ 0,-1], cx: PAD_CX,       cy: PAD_CY - GAP },
+  { dir: [ 0, 1], cx: PAD_CX,       cy: PAD_CY + GAP },
+  { dir: [-1, 0], cx: PAD_CX - GAP, cy: PAD_CY },
+  { dir: [ 1, 0], cx: PAD_CX + GAP, cy: PAD_CY }
+];
 
 /* ---------------- game state ---------------- */
 const game = {
@@ -110,7 +122,7 @@ function caveParams(n) {
     flies:  Math.min(6, 1 + Math.floor(n/1.5)),
     bflies: n >= 3 ? Math.min(4, Math.floor((n-1)/2)) : 0,
     need:   8 + n * 2,
-    time:   Math.max(80, 150 - n * 5)
+    time:   Math.max(110, 190 - n * 5)   /* a wider cave takes longer to cross */
   };
 }
 
@@ -311,8 +323,8 @@ function tryMove(dx, dy) {
 }
 function stepTo(nx,ny) { player.x = nx; player.y = ny; player.idleT = 0; }
 
-/* ---------------- input: floating joystick ---------------- */
-const input = { touching:false, ox:0, oy:0, dx:0, dy:0 };
+/* ---------------- input: the arrow pad ---------------- */
+const input = { active:false, x:0, y:0 };
 function pt(e) {
   const r = canvas.getBoundingClientRect();
   return { x: ((e.clientX - r.left)/r.width)*W, y: ((e.clientY - r.top)/r.height)*H };
@@ -320,28 +332,28 @@ function pt(e) {
 canvas.addEventListener('pointerdown', e => {
   audio();
   const p = pt(e);
-  input.touching = true;
-  input.ox = p.x; input.oy = p.y; input.dx = 0; input.dy = 0;
+  input.active = true; input.x = p.x; input.y = p.y;
   if (game.state === 'title' || game.state === 'gameover') startRequested = true;
   e.preventDefault();
 });
 canvas.addEventListener('pointermove', e => {
-  if (!input.touching) return;
+  if (!input.active) return;
   const p = pt(e);
-  input.dx = p.x - input.ox; input.dy = p.y - input.oy;
-  /* joystick recenters if you drag far, so direction changes feel snappy */
-  const m = Math.hypot(input.dx, input.dy);
-  if (m > 60) { input.ox = p.x - input.dx/m*60; input.oy = p.y - input.dy/m*60; }
+  input.x = p.x; input.y = p.y;      /* slide straight from one arrow to the next */
   e.preventDefault();
 });
-addEventListener('pointerup',     () => { input.touching = false; input.dx = input.dy = 0; });
-addEventListener('pointercancel', () => { input.touching = false; input.dx = input.dy = 0; });
+addEventListener('pointerup',     () => { input.active = false; });
+addEventListener('pointercancel', () => { input.active = false; });
 
+/* whichever arrow the thumb is nearest, within a forgiving radius */
 function heldDir() {
-  const m = Math.hypot(input.dx, input.dy);
-  if (!input.touching || m < 18) return null;
-  if (Math.abs(input.dx) > Math.abs(input.dy)) return [Math.sign(input.dx), 0];
-  return [0, Math.sign(input.dy)];
+  if (!input.active) return null;
+  let best = null, bd = 1e9;
+  for (const b of DPAD) {
+    const d = Math.hypot(input.x - b.cx, input.y - b.cy);
+    if (d < bd) { bd = d; best = b; }
+  }
+  return (best && bd < BTN * 1.15) ? best.dir : null;
 }
 
 /* ---------------- update ---------------- */
@@ -386,7 +398,7 @@ function update(dt) {
     if (now <= 10 && now !== before && now > 0) sfx.tick();
     if (game.time <= 0) { game.time = 0; killPlayer(true); }
 
-    /* stepped movement while joystick held */
+    /* stepped movement while an arrow is held */
     moveT -= dt;
     const d = heldDir();
     if (d && moveT <= 0) { tryMove(d[0], d[1]); moveT = 0.13; }
@@ -401,12 +413,19 @@ function update(dt) {
     if (player.blink < -rnd(2,4)) player.blink = 0.15;
   }
 
-  /* camera follows player */
-  const vw = W, vh = H - HUD;
-  const tx = clamp(player.x*TS + TS/2 - vw/2, 0, CW*TS - vw);
-  const ty = clamp(player.y*TS + TS/2 - vh/2, 0, CH*TS - vh);
-  cam.x += (tx - cam.x) * Math.min(1, dt*6);
-  cam.y += (ty - cam.y) * Math.min(1, dt*6);
+  /* The window chases him only once he nears its edge, the way the
+     original scrolled: steady while you work, moving when you travel. */
+  const mx = TS * 3, my = TS * 3;
+  const px = player.x * TS, py = player.y * TS;
+  let tx = cam.x, ty = cam.y;
+  if (px < cam.x + mx)            tx = px - mx;
+  if (px + TS > cam.x + VW - mx)  tx = px + TS - VW + mx;
+  if (py < cam.y + my)            ty = py - my;
+  if (py + TS > cam.y + VH - my)  ty = py + TS - VH + my;
+  tx = clamp(tx, 0, Math.max(0, CW*TS - VW));
+  ty = clamp(ty, 0, Math.max(0, CH*TS - VH));
+  cam.x += (tx - cam.x) * Math.min(1, dt*8);
+  cam.y += (ty - cam.y) * Math.min(1, dt*8);
 }
 
 /* ---------------- drawing ---------------- */
@@ -575,11 +594,11 @@ function draw(dt) {
 
   ctx.save();
   ctx.translate(0, HUD);
-  ctx.beginPath(); ctx.rect(0, 0, W, H-HUD); ctx.clip();
+  ctx.beginPath(); ctx.rect(0, 0, VW, VH); ctx.clip();
   ctx.translate(-Math.round(cam.x), -Math.round(cam.y));
 
-  const x0 = clamp(Math.floor(cam.x/TS)-1, 0, CW), x1 = clamp(Math.ceil((cam.x+W)/TS)+1, 0, CW);
-  const y0 = clamp(Math.floor(cam.y/TS)-1, 0, CH), y1 = clamp(Math.ceil((cam.y+H-HUD)/TS)+1, 0, CH);
+  const x0 = clamp(Math.floor(cam.x/TS)-1, 0, CW), x1 = clamp(Math.ceil((cam.x+VW)/TS)+1, 0, CW);
+  const y0 = clamp(Math.floor(cam.y/TS)-1, 0, CH), y1 = clamp(Math.ceil((cam.y+VH)/TS)+1, 0, CH);
   for (let y=y0;y<y1;y++) for (let x=x0;x<x1;x++) {
     const v = grid[idx(x,y)];
     if (v !== T.EMPTY) drawTile(v, x*TS, y*TS, x, y, t);
@@ -594,7 +613,7 @@ function draw(dt) {
   /* explosion flash */
   if (game.flash > 0) {
     ctx.fillStyle = 'rgba(255,220,150,' + (game.flash*1.6) + ')';
-    ctx.fillRect(0, HUD, W, H-HUD);
+    ctx.fillRect(0, HUD, VW, VH);
   }
 
   /* ---------------- HUD ---------------- */
@@ -628,16 +647,49 @@ function draw(dt) {
   }
   text('HI ' + game.hi, W/2, 39, 10, '#c9d4e0');
 
-  /* joystick ghost */
-  if (input.touching && game.state === 'play') {
-    ctx.globalAlpha = 0.25;
-    ctx.strokeStyle = '#ffffff';
-    ctx.beginPath(); ctx.arc(input.ox, input.oy, 28, 0, 6.28); ctx.stroke();
-    const m = Math.hypot(input.dx, input.dy) || 1;
-    const kx = input.ox + input.dx/m*Math.min(m,28), ky = input.oy + input.dy/m*Math.min(m,28);
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath(); ctx.arc(kx, ky, 10, 0, 6.28); ctx.fill();
-    ctx.globalAlpha = 1;
+  /* ---------------- the control pad ---------------- */
+  ctx.fillStyle = '#0a0714';
+  ctx.fillRect(0, H - DPAD_H, W, DPAD_H);
+  ctx.fillStyle = '#20242e';
+  ctx.fillRect(0, H - DPAD_H, W, 2);
+
+  const held = heldDir();
+  for (const b of DPAD) {
+    const on = held && held[0] === b.dir[0] && held[1] === b.dir[1];
+    const x = b.cx - BTN/2, y = b.cy - BTN/2;
+    ctx.fillStyle = on ? '#3f6b46' : '#1c2436';
+    ctx.beginPath(); ctx.roundRect(x, y, BTN, BTN, 11); ctx.fill();
+    ctx.strokeStyle = on ? '#7cf29a' : '#39415c';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(x + 1, y + 1, BTN - 2, BTN - 2, 10); ctx.stroke();
+    ctx.lineWidth = 1;
+    /* the arrowhead */
+    const a = 13, cx2 = b.cx, cy2 = b.cy;
+    ctx.fillStyle = on ? '#ffffff' : '#c9d4e0';
+    ctx.beginPath();
+    if (b.dir[1] === -1) { ctx.moveTo(cx2, cy2 - a); ctx.lineTo(cx2 + a, cy2 + a*0.7); ctx.lineTo(cx2 - a, cy2 + a*0.7); }
+    if (b.dir[1] ===  1) { ctx.moveTo(cx2, cy2 + a); ctx.lineTo(cx2 + a, cy2 - a*0.7); ctx.lineTo(cx2 - a, cy2 - a*0.7); }
+    if (b.dir[0] === -1) { ctx.moveTo(cx2 - a, cy2); ctx.lineTo(cx2 + a*0.7, cy2 + a); ctx.lineTo(cx2 + a*0.7, cy2 - a); }
+    if (b.dir[0] ===  1) { ctx.moveTo(cx2 + a, cy2); ctx.lineTo(cx2 - a*0.7, cy2 + a); ctx.lineTo(cx2 - a*0.7, cy2 - a); }
+    ctx.closePath(); ctx.fill();
+  }
+
+  /* once the quota is met, point the way to an exit that is off-screen */
+  if (game.state === 'play' && game.got >= game.need) {
+    const ex = exitPos.x * TS + TS/2 - cam.x, ey = exitPos.y * TS + TS/2 - cam.y + HUD;
+    const off = ex < 0 || ex > VW || ey < HUD || ey > HUD + VH;
+    if (off && Math.floor(performance.now()/350) % 2 === 0) {
+      const mx2 = clamp(ex, 22, VW - 22), my2 = clamp(ey, HUD + 22, HUD + VH - 22);
+      const ang = Math.atan2(ey - my2, ex - mx2);
+      ctx.save();
+      ctx.translate(mx2, my2);
+      ctx.rotate(ang);
+      ctx.fillStyle = '#ffd21f';
+      ctx.beginPath();
+      ctx.moveTo(14, 0); ctx.lineTo(-8, 9); ctx.lineTo(-8, -9);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
   }
 
   if (game.msgTimer > 0 && game.msg) {
@@ -658,7 +710,8 @@ function draw(dt) {
     drawTile(T.EXITO, W/2-88, H*0.56, 1, 1, t); text('find den blinkende udgang', W/2-58, H*0.56+11, 11, '#ffd21f', 'left');
     if (Math.floor(performance.now()/500) % 2 === 0)
       text('TRYK FOR AT STARTE', W/2, H*0.68, 16, '#ffffff');
-    text('hold & træk = joystick', W/2, H*0.75, 11, '#c9d4e0');
+    text('brug pilene forneden', W/2, H*0.75, 11, '#c9d4e0');
+    text('du ser kun en del af grotten ad gangen', W/2, H*0.79, 10, '#8f88a8');
     text('lilla sommerfugle bliver til diamanter…', W/2, H*0.80, 10, '#c86bff');
   }
 
