@@ -65,8 +65,22 @@ const sfx = {
   push:  () => beep(70, 0.08, 'triangle', 0.08),
   boom:  () => { beep(110, 0.3, 'sawtooth', 0.11, -70); beep(55, 0.4, 'triangle', 0.1, -25); },
   die:   () => beep(350, 0.6, 'sawtooth', 0.11, -300),
-  /* cartoon squash: a flat 'splat' and a sad slide-whistle going down */
-  splat: () => { beep(160, 0.16, 'square', 0.12, -110); setTimeout(() => beep(1100, 0.7, 'sine', 0.08, -900), 140); },
+  /* the opening of Chopin's funeral march (Piano Sonata no. 2, 1839), in B-flat minor:
+     a low bell-like melody over a slow tolling bass */
+  march: () => {
+    const Bb = 233.08, A = 220.0, C = 261.63, Db = 277.18, BASS = 116.54, BASS5 = 174.61;
+    const b = 0.62;                                   /* one beat, in seconds */
+    const tune = [ [Bb,1], [Bb,0.75], [Bb,0.25], [Bb,1],
+                   [Db,0.75], [C,0.25], [C,0.75], [Bb,0.25], [Bb,0.75], [A,0.25], [Bb,2] ];
+    let at = 0;
+    for (const [f, len] of tune) {
+      const when = at * b * 1000;
+      setTimeout(() => { beep(f, len * b * 0.95, 'triangle', 0.1); beep(f * 2, len * b * 0.6, 'sine', 0.025); }, when);
+      at += len;
+    }
+    for (let k = 0; k < Math.ceil(at); k++)          /* the tolling left hand: one chord per beat */
+      setTimeout(() => { beep(BASS, b * 0.9, 'sine', 0.07); beep(BASS5, b * 0.7, 'sine', 0.035); }, k * b * 1000);
+  },
   wobble:() => beep(180, 0.06, 'triangle', 0.05, 40),
   open:  () => { beep(523,0.09,'square',0.07); setTimeout(()=>beep(659,0.09,'square',0.07),90); setTimeout(()=>beep(784,0.09,'square',0.07),180); setTimeout(()=>beep(1046,0.18,'square',0.07),270); },
   clear: () => { beep(659,0.1,'square',0.07); setTimeout(()=>beep(880,0.1,'square',0.07),110); setTimeout(()=>beep(1046,0.22,'square',0.07),220); },
@@ -155,7 +169,7 @@ function genCave(n) {
   }
 
   /* player start: top-left pocket */
-  player.x = 2; player.y = 2; player.alive = true; player.face = 1; player.flat = false; player.deadT = 0;
+  player.x = 2; player.y = 2; player.alive = true; player.face = 1; player.grave = false; player.deadT = 0;
   for (let y=1;y<=3;y++) for (let x=1;x<=3;x++) set(x,y,T.DIRT);
   set(2,2,T.EMPTY);
   set(2,1,T.DIRT); /* no rock above the start */
@@ -202,16 +216,16 @@ function boom(cx, cy, toGem) {
   }
 }
 
-function killPlayer(withBoom, squashed) {
+function killPlayer(withBoom) {
   if (!player.alive) return;
   player.alive = false;
   player.deadT = 0;
-  player.flat = true;              /* every death ends with him flat as a pancake */
-  player.squashed = !!squashed;    /* a boulder landed on him: no explosion, the rock stays on top */
-  if (squashed) sfx.splat(); else sfx.die();
+  player.grave = true;             /* when the smoke clears, a little grave marks the spot */
+  player.mourned = false;          /* the funeral march has not started yet */
+  sfx.die();
   if (withBoom) boom(player.x, player.y, false);
   game.state = 'dead';
-  game.timer = 2.6;                /* time to enjoy the flattened miner */
+  game.timer = 6.2;                /* explosion, grave, and the march to the end */
 }
 
 function settleExplosions() {
@@ -244,7 +258,7 @@ function physTick() {
         continue;
       }
       if (fall[i]) {
-        if (belowIsPlayer) { set(x,y,T.EMPTY); set(x,y+1,v); fall[idx(x,y+1)]=0; killPlayer(false, true); fall[i]=0; game.flash = 0.12; continue; }
+        if (belowIsPlayer) { set(x,y,T.EMPTY); set(x,y+1,v); fall[idx(x,y+1)]=1; killPlayer(true); fall[i]=0; continue; }
         if (belowEnemy)   { const gem = below === T.BFLY; set(x,y+1,T.EMPTY); boom(x, y+1, gem); fall[i]=0; continue; }
       }
       /* roll off rounded things -- but first it teeters for a moment,
@@ -409,9 +423,10 @@ function update(dt) {
     /* let the blast clear, then show him flattened where he stood */
     if (expl.length) {
       tickT += dt;
-      while (tickT >= TICK && expl.length) { tickT -= TICK; settleExplosions(); }
-      if (!expl.length) player.deadT = 0;    /* start the squash once the smoke is gone */
+      while (tickT >= TICK * 2.5 && expl.length) { tickT -= TICK * 2.5; settleExplosions(); }   /* let the blast linger a moment */
+      if (!expl.length) player.deadT = 0;    /* the grave rises once the smoke is gone */
     }
+    if (!expl.length && !player.mourned) { player.mourned = true; player.deadT = 0; sfx.march(); }
     if (game.timer <= 0) {
       if (game.lives > 1) { game.lives--; startCave(); }
       else { game.lives = 0; game.state = 'gameover'; }
@@ -812,7 +827,7 @@ function drawPapmand(sx, sy, t) {
   ctx.beginPath();
   ctx.moveTo(M(8.6), Y(5)); ctx.quadraticCurveTo(M(5.5), Y(3.5), M(6.5), Y(7.5)); ctx.lineTo(M(9), Y(8)); ctx.closePath(); ctx.fill();
 
-  if (player.alive) {   /* when he's squashed the hat has already popped off */
+  if (player.alive) {   /* only drawn while he is alive */
   /* hard hat, worn a touch back so the hair shows */
   ctx.fillStyle = HAT;
   ctx.beginPath(); ctx.arc(X(18), Y(4.6), 9*u, Math.PI, 0); ctx.closePath(); ctx.fill();
@@ -888,76 +903,59 @@ function drawPapmand(sx, sy, t) {
   }
 }
 
-/* ---------------- the flattened miner ----------------
-   Pressed flat as a pancake: twice as wide, a sliver tall, X-eyes,
-   his hard hat popped off and bouncing away, stars circling above. */
-function drawFlatPapmand(sx, sy, t) {
-  const k = Math.min(1, player.deadT / 0.12);          /* squash happens in a blink */
-  const sy0 = 1 - 0.6 * k, sx0 = 1 + 1.2 * k;          /* scale: flat and wide */
-  const wig = Math.sin(player.deadT * 30) * 0.06 * Math.max(0, 1 - player.deadT * 2); /* a jelly wobble */
-  ctx.save();
-  ctx.translate(sx + TS/2, sy + TS);
-  ctx.scale(sx0 + wig, sy0 - wig * 0.5);
-  ctx.translate(-TS/2, -TS);
-  const keep = { walkT: player.walkT, joyT: player.joyT, blink: player.blink };
-  player.walkT = 9; player.joyT = 0; player.blink = 1;   /* lids shut under the X-eyes */
-  drawPapmand(0, 0, 0);
-  Object.assign(player, keep);
-  ctx.restore();
+/* ---------------- the grave ----------------
+   A fresh mound of dirt rises where he fell, a little wooden cross drops
+   in on top, and his yellow hard hat lands on the cross. */
+function drawGrave(sx, sy, t) {
+  const u = TS / 36, d = player.deadT;
+  const gx = sx + TS / 2, gy = sy + TS;               /* bottom centre of his cell */
+  const ease = k => 1 - Math.pow(1 - Math.min(1, Math.max(0, k)), 3);
+  const bounce = k => { k = Math.min(1, Math.max(0, k)); return k < 0.7 ? (k / 0.7) * (k / 0.7) : 1 - Math.sin((k - 0.7) / 0.3 * Math.PI) * 0.12; };
 
-  /* X-eyes drawn on top, so they stay readable on the flat face */
-  const u = TS / 36, ey = sy + TS - (TS - 11 * u) * sy0;
-  ctx.strokeStyle = '#2d241e'; ctx.lineWidth = 1.6 * u; ctx.lineCap = 'round';
-  for (const ex of [sx + TS/2 - 3.5 * u * sx0, sx + TS/2 + 3.5 * u * sx0]) {
-    ctx.beginPath();
-    ctx.moveTo(ex - 1.8*u, ey - 1.2*u); ctx.lineTo(ex + 1.8*u, ey + 1.2*u);
-    ctx.moveTo(ex + 1.8*u, ey - 1.2*u); ctx.lineTo(ex - 1.8*u, ey + 1.2*u);
-    ctx.stroke();
-  }
-
-  /* the hard hat pops off, flies up and bounces down beside him */
-  const ht = player.deadT, f = player.face > 0 ? 1 : -1;
-  let hx = sx + TS/2 + f * ht * 34, hy;
-  if (ht < 0.55) hy = sy - 4 - (ht * 140 - ht * ht * 250);
-  else hy = sy + TS - 6 - Math.abs(Math.sin((ht - 0.55) * 9)) * 8 * Math.max(0, 1 - (ht - 0.55) * 1.5);
-  hy = Math.min(hy, sy + TS - 6);
-  if (ht >= 0.55) hx = sx + TS/2 + f * 0.55 * 34;
-  ctx.save(); ctx.translate(hx, hy); ctx.rotate(f * Math.min(ht * 9, 3.14 * 1.0));
-  ctx.fillStyle = '#f2c230';
-  ctx.beginPath(); ctx.arc(0, 0, 9 * u, Math.PI, 0); ctx.closePath(); ctx.fill();
-  ctx.fillStyle = '#c7951c';
-  ctx.beginPath(); ctx.roundRect(-11 * u, -0.8 * u, 22 * u, 2.4 * u, 1.2 * u); ctx.fill();
-  ctx.fillStyle = '#fff4c2';
-  ctx.beginPath(); ctx.arc(4.5 * u, -3.4 * u, 1.7 * u, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-
-  /* little stars circling where his head used to be */
-  if (player.deadT > 0.25) {
-    for (let i = 0; i < 3; i++) {
-      const a = t * 5 + i * 2.09;
-      const px = sx + TS/2 + Math.cos(a) * 12 * u, py = sy + TS - 10 * u + Math.sin(a) * 3.5 * u;
-      ctx.fillStyle = i === 1 ? '#ffffff' : '#ffd21f';
-      ctx.beginPath();
-      for (let j = 0; j < 10; j++) {
-        const r = (j % 2 ? 1.2 : 3) * u, b = j * Math.PI / 5 - Math.PI / 2;
-        ctx.lineTo(px + Math.cos(b) * r, py + Math.sin(b) * r);
-      }
-      ctx.closePath(); ctx.fill();
+  /* the mound of dirt */
+  const m = ease(d / 0.4);
+  if (m > 0) {
+    ctx.fillStyle = '#5e3817';
+    ctx.beginPath(); ctx.ellipse(gx, gy, 17 * u, 11 * u * m, 0, Math.PI, 0); ctx.fill();
+    ctx.fillStyle = '#7a4b21';
+    ctx.beginPath(); ctx.ellipse(gx, gy, 15.5 * u, 9.5 * u * m, 0, Math.PI, 0); ctx.fill();
+    ctx.fillStyle = '#8f5a2a';                        /* clods and pebbles */
+    for (const [ox, oy, r] of [[-8, 3, 1.8], [5, 5, 2.2], [-2, 7, 1.4], [10, 2.5, 1.5], [-12, 1.5, 1.3]]) {
+      ctx.beginPath(); ctx.arc(gx + ox * u, gy - oy * u * m, r * u, 0, Math.PI * 2); ctx.fill();
     }
+    ctx.fillStyle = '#4a2c12';
+    ctx.beginPath(); ctx.arc(gx + 2 * u, gy - 3 * u * m, 1.2 * u, 0, Math.PI * 2); ctx.fill();
   }
 
-  /* SPLAT! */
-  if (player.deadT > 0.08 && player.deadT < 1.6) {
-    const a = Math.min(1, (1.6 - player.deadT) * 2);
-    const sc = 1 + Math.max(0, 0.25 - player.deadT) * 2;
-    ctx.save();
-    ctx.globalAlpha = a;
-    ctx.translate(sx + TS/2, sy - 16);
-    ctx.scale(sc, sc);
-    ctx.font = '900 15px system-ui, sans-serif';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.lineWidth = 4; ctx.strokeStyle = '#000'; ctx.strokeText('SPLAT!', 0, 0);
-    ctx.fillStyle = '#ffd21f'; ctx.fillText('SPLAT!', 0, 0);
+  /* the cross drops in and wobbles to a stop */
+  const cT = (d - 0.35) / 0.45;
+  if (cT > 0) {
+    const top = gy - 9 * u - 26 * u;                  /* resting height of the top of the post */
+    const y = top - (1 - bounce(cT)) * 60 * u;
+    const tilt = cT > 1 ? Math.sin((d - 0.8) * 7) * 0.05 * Math.max(0, 1 - (d - 0.8)) - 0.05 : -0.05;
+    ctx.save(); ctx.translate(gx, y + 26 * u); ctx.rotate(tilt); ctx.translate(-gx, -(y + 26 * u));
+    ctx.fillStyle = '#4a2f15';
+    ctx.fillRect(gx - 2.4 * u, y - 0.6 * u, 4.8 * u, 27.2 * u);    /* outline */
+    ctx.fillRect(gx - 9.6 * u, y + 5.4 * u, 19.2 * u, 4.8 * u);
+    ctx.fillStyle = '#9a6a38';
+    ctx.fillRect(gx - 1.8 * u, y, 3.6 * u, 26 * u);                 /* post */
+    ctx.fillRect(gx - 9 * u, y + 6 * u, 18 * u, 3.6 * u);           /* crossbar */
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fillRect(gx - 1.8 * u, y, 1 * u, 26 * u);
+
+    /* his hard hat comes down last and settles on top of the cross */
+    const hT = (d - 0.9) / 0.4;
+    if (hT > 0) {
+      const hy = y - 0.5 * u - (1 - bounce(hT)) * 50 * u;
+      ctx.save(); ctx.translate(gx + 0.5 * u, hy); ctx.rotate(0.18);
+      ctx.fillStyle = '#f2c230';
+      ctx.beginPath(); ctx.arc(0, 0, 6.5 * u, Math.PI, 0); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#c7951c';
+      ctx.beginPath(); ctx.roundRect(-8 * u, -0.4 * u, 16 * u, 2 * u, 1 * u); ctx.fill();
+      ctx.fillStyle = '#fff4c2';
+      ctx.beginPath(); ctx.arc(3.2 * u, -2.6 * u, 1.3 * u, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
     ctx.restore();
   }
 }
@@ -981,9 +979,9 @@ function draw(dt) {
 
   if (player.alive && (game.state === 'play' || game.state === 'clear')) {
     drawPapmand(player.x*TS, player.y*TS, t);
-  } else if (!player.alive && player.flat && game.state === 'dead' && expl.length === 0) {
-    /* after any explosion clears (or at once if a boulder squashed him) */
-    drawFlatPapmand(player.x*TS, player.y*TS, t);
+  } else if (!player.alive && player.grave && game.state === 'dead' && expl.length === 0) {
+    /* once the explosion has cleared */
+    drawGrave(player.x*TS, player.y*TS, t);
   }
 
   ctx.restore();
