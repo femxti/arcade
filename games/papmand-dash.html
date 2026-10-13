@@ -638,18 +638,7 @@ function drawTile(v, sx, sy, x, y, t) {
       break;
     }
     case T.FLY: {
-      const wob = Math.sin(t*10 + x*3+y);
-      ctx.fillStyle = '#ff8c1a';
-      ctx.beginPath();
-      ctx.arc(sx+TS/2, sy+TS/2, TS/3 + wob, 0, 6.28);
-      ctx.fill();
-      ctx.fillStyle = '#fff6d0';
-      ctx.fillRect(sx+TS/2-5, sy+TS/2-3, 3, 3);
-      ctx.fillRect(sx+TS/2+2, sy+TS/2-3, 3, 3);
-      ctx.strokeStyle = 'rgba(255,140,26,0.6)';
-      ctx.beginPath();
-      ctx.arc(sx+TS/2, sy+TS/2, TS/2-2 + wob, 0, 6.28);
-      ctx.stroke();
+      drawBomb(sx, sy, t, x, y);
       break;
     }
     case T.BFLY: {
@@ -664,6 +653,70 @@ function drawTile(v, sx, sy, x, y, t) {
       break;
     }
   }
+}
+
+/* ---------------- the bomb ----------------
+   A round black bomb with a shiny highlight, a metal cap on top and a
+   curling fuse with a spark fizzing at the end. It jiggles impatiently. */
+function drawBomb(sx, sy, t, x, y) {
+  const u = TS / 36;
+  const seed = x * 3.1 + y * 1.7;
+  const jig = Math.sin(t * 14 + seed) * 0.6 * u;           /* nervous little shake */
+  const cx = sx + TS / 2 + jig, cy = sy + TS / 2 + 3 * u;
+  const r = 12 * u;
+
+  /* shadow */
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath(); ctx.ellipse(cx, sy + TS - 2 * u, 10 * u, 2.2 * u, 0, 0, Math.PI * 2); ctx.fill();
+
+  /* the black ball, lit from the upper left */
+  const g = ctx.createRadialGradient(cx - 4 * u, cy - 5 * u, 1 * u, cx, cy, r);
+  g.addColorStop(0, '#5a6070'); g.addColorStop(0.45, '#262a33'); g.addColorStop(1, '#0b0c10');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.75)';                 /* the shine */
+  ctx.beginPath(); ctx.ellipse(cx - 5 * u, cy - 5 * u, 3 * u, 1.8 * u, -0.7, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.beginPath(); ctx.arc(cx - 1.5 * u, cy - 8 * u, 1 * u, 0, Math.PI * 2); ctx.fill();
+
+  /* the metal cap, tilted toward the upper right */
+  ctx.save();
+  ctx.translate(cx + 7 * u, cy - 8.5 * u); ctx.rotate(0.75);
+  ctx.fillStyle = '#9aa5b5';
+  ctx.fillRect(-3.6 * u, -2.6 * u, 7.2 * u, 5 * u);
+  ctx.fillStyle = '#c9d4e0';
+  ctx.fillRect(-3.6 * u, -2.6 * u, 7.2 * u, 1.4 * u);
+  ctx.fillStyle = '#5b6472';
+  ctx.fillRect(-3.6 * u, 1.6 * u, 7.2 * u, 0.9 * u);
+  ctx.restore();
+
+  /* the fuse, curling up and out */
+  const fx0 = cx + 9 * u, fy0 = cy - 11.5 * u;
+  const fx1 = cx + 14.5 * u, fy1 = cy - 15.5 * u;
+  ctx.strokeStyle = '#c8a26b'; ctx.lineWidth = 1.8 * u; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(fx0, fy0); ctx.quadraticCurveTo(cx + 13 * u, cy - 11 * u, fx1, fy1); ctx.stroke();
+
+  /* the spark: a flickering star with a glow, throwing off sparks */
+  const fl = 0.75 + 0.25 * Math.sin(t * 40 + seed) + 0.15 * Math.sin(t * 23 + seed * 2);
+  ctx.fillStyle = 'rgba(255,200,80,0.35)';
+  ctx.beginPath(); ctx.arc(fx1, fy1, 5 * u * fl, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ffd21f';
+  ctx.beginPath();
+  for (let j = 0; j < 12; j++) {
+    const a = j * Math.PI / 6 + t * 6, rr = (j % 2 ? 1.2 : 3.6) * u * fl;
+    ctx.lineTo(fx1 + Math.cos(a) * rr, fy1 + Math.sin(a) * rr);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.arc(fx1, fy1, 1.2 * u, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ff8c1a';
+  for (let k = 0; k < 3; k++) {                                     /* flying sparks */
+    const ph = (t * 3 + k / 3 + seed) % 1;
+    const a = -1.2 + k * 0.9;
+    ctx.globalAlpha = 1 - ph;
+    ctx.fillRect(fx1 + Math.cos(a) * ph * 7 * u, fy1 + Math.sin(a) * ph * 7 * u, 1.4 * u, 1.4 * u);
+  }
+  ctx.globalAlpha = 1;
 }
 
 /* ---------------- the butterfly ----------------
@@ -1243,15 +1296,15 @@ function draw(dt) {
     text('PAPMAND', W/2, H*0.22, 42, '#c99a5b');
     text('DASH', W/2, H*0.29, 34, '#50dcff');
     /* mini legend */
-    drawTile(T.GEM, W/2-88, H*0.38, 1, 1, t);   text('saml diamanter', W/2-58, H*0.38+11, 11, '#50dcff', 'left');
-    drawTile(T.ROCK, W/2-88, H*0.44, 1, 1, t);  text('pas på faldende sten', W/2-58, H*0.44+11, 11, '#c9d4e0', 'left');
-    drawTile(T.FLY, W/2-88, H*0.50, 2, 2, t);   text('undgå væsnerne', W/2-58, H*0.50+11, 11, '#ff8c1a', 'left');
-    drawTile(T.EXITO, W/2-88, H*0.56, 1, 1, t); text('find den blinkende udgang', W/2-58, H*0.56+11, 11, '#ffd21f', 'left');
+    drawTile(T.GEM, W/2-106, H*0.38, 1, 1, t);   text('saml diamanter', W/2-56, H*0.38+18, 11, '#50dcff', 'left');
+    drawTile(T.ROCK, W/2-106, H*0.44, 1, 1, t);  text('pas på faldende sten', W/2-56, H*0.44+18, 11, '#c9d4e0', 'left');
+    drawTile(T.FLY, W/2-106, H*0.50, 2, 2, t);   text('undgå bomberne', W/2-56, H*0.50+18, 11, '#ff8c1a', 'left');
+    drawTile(T.EXITO, W/2-106, H*0.56, 1, 1, t); text('find den blinkende udgang', W/2-56, H*0.56+18, 11, '#ffd21f', 'left');
     if (Math.floor(performance.now()/500) % 2 === 0)
       text('TRYK FOR AT STARTE', W/2, H*0.68, 16, '#ffffff');
-    text('brug pilene forneden', W/2, H*0.75, 11, '#c9d4e0');
-    text('du ser kun en del af grotten ad gangen', W/2, H*0.79, 10, '#8f88a8');
-    text('lilla sommerfugle bliver til diamanter…', W/2, H*0.80, 10, '#c86bff');
+    text('brug pilene forneden', W/2, H*0.745, 11, '#c9d4e0');
+    text('du ser kun en del af grotten ad gangen', W/2, H*0.776, 10, '#8f88a8');
+    text('sommerfugle bliver til diamanter…', W/2, H*0.806, 10, '#ff8fd8');
   }
 
   if (game.state === 'gameover') {
