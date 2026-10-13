@@ -363,9 +363,10 @@ function resetBtnRect() {
   return { x: (W - RESET_BTN.w) / 2, y: HUD + VH - RESET_BTN.h - 14, w: RESET_BTN.w, h: RESET_BTN.h };
 }
 function resetVisible() { return game.state === 'play' && stuckT > 1.2; }
-/* "Grav igen": on the grave screen, once the cross is up; and on game over */
+/* "Grav igen": on the grave screen once the cross is up, but only while he
+   still has a life left. When he dies for good, the game simply ends. */
 function digAgainVisible() {
-  return (game.state === 'dead' && player.mourned && player.deadT > 1.2) || game.state === 'gameover';
+  return game.state === 'dead' && game.lives > 1 && player.mourned && player.deadT > 1.2;
 }
 function digAgain() {
   stopMarch();
@@ -1332,12 +1333,13 @@ function drawOverlays(t) {
     text('SCORE  ' + game.score, W/2, H*0.48, 16, '#ffffff');
     text('GRUBE ' + game.cave, W/2, H*0.53, 12, '#39d5ff');
     if (game.score >= game.hi) text('NY REKORD!', W/2, H*0.58, 13, '#ffd21f');
+    if (Math.floor(performance.now()/500) % 2 === 0)
+      text('TRYK FOR AT PRØVE IGEN', W/2, H*0.66, 14, '#ffffff');
   }
 
   /* "Grav igen": dig again, from the grave or from game over */
   if (digAgainVisible()) {
-    const a = game.state === 'gameover' ? 1 : Math.min(1, (player.deadT - 1.2) * 3);
-    drawYellowButton('GRAV IGEN', a, t);
+    drawYellowButton('GRAV IGEN', Math.min(1, (player.deadT - 1.2) * 3), t);
   }
 }
 
