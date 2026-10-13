@@ -449,27 +449,47 @@ function caveIsStuck() {
   seen[idx(player.x, player.y)] = 1;
   let gems = 0, exitOK = false, cells = 1;
   const need = Math.max(0, game.need - game.got);
-  while (q.length) {
-    const y = q.pop(), x = q.pop();
-    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-      const nx = x + dx, ny = y + dy, v = at(nx, ny), k = idx(nx, ny);
-      if (nx < 0 || ny < 0 || nx >= CW || ny >= CH || seen[k]) continue;
-      if (v === T.EXITC || v === T.EXITO) { exitOK = true; continue; }
-      let ok = v === T.EMPTY || v === T.DIRT || v === T.GEM || v === T.EXPL;
-      if (v === T.ROCK && dy === 0 && at(nx + dx, ny) === T.EMPTY) ok = true;   /* could push it */
-      if (v === T.ROCK || v === T.GEM) {                                          /* or dig it loose */
-        const under = at(nx, ny + 1);
-        const onHisHead = nx === player.x && ny + 1 === player.y;               /* can't drop it on himself */
-        if (!onHisHead && (under === T.DIRT || under === T.EMPTY || under === T.GEM)) ok = true;
+  const blocked = [];                     /* boulders at the edge of his area, checked again below */
+  const add = (x, y, v) => {
+    seen[idx(x, y)] = 1; cells++;
+    if (v === T.GEM) gems++;
+    q.push(x, y);
+  };
+  for (;;) {
+    while (q.length) {
+      const y = q.pop(), x = q.pop();
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = x + dx, ny = y + dy, v = at(nx, ny);
+        if (nx < 0 || ny < 0 || nx >= CW || ny >= CH || seen[idx(nx, ny)]) continue;
+        if (v === T.EXITC || v === T.EXITO) { exitOK = true; continue; }
+        let ok = v === T.EMPTY || v === T.DIRT || v === T.GEM || v === T.EXPL;
+        if (v === T.ROCK && dy === 0 && at(nx + dx, ny) === T.EMPTY) ok = true;   /* he can push it aside */
+        if (!ok) { if (v === T.ROCK) blocked.push(nx, ny); continue; }
+        add(nx, ny, v);
+        if (cells > POCKET) return false;          /* plenty of room left to work in */
       }
-      if (!ok) continue;
-      seen[k] = 1; cells++;
-      if (cells > POCKET) return false;          /* plenty of room left to work in */
-      if (v === T.GEM) gems++;
-      q.push(nx, ny);
     }
+    /* A boulder he can't push can still be dropped out of the way, but only
+       if he can reach the spot under it, and has somewhere else to stand
+       while it falls. Each one freed this way may open up more. */
+    let freed = false;
+    for (let b = 0; b < blocked.length; b += 2) {
+      const bx = blocked[b], by = blocked[b + 1];
+      if (seen[idx(bx, by)] || !seen[idx(bx, by + 1)] || cells < 2) continue;
+      add(bx, by, T.ROCK); freed = true;
+      if (cells > POCKET) return false;
+    }
+    if (!freed) break;
   }
   return gems < need || !exitOK;
+}
+/* Some random caves seal the miner's start pocket in with boulders and
+   brick. Throw those away and dig a fresh one, so every cave can be won. */
+function genPlayableCave(n) {
+  for (let tries = 0; tries < 30; tries++) {
+    genCave(n);
+    if (!caveIsStuck()) return;
+  }
 }
 function resetBtnRect() {
   return { x: (W - RESET_BTN.w) / 2, y: HUD + VH - RESET_BTN.h - 14, w: RESET_BTN.w, h: RESET_BTN.h };
@@ -488,7 +508,7 @@ function digAgain() {
 }
 function restartSameCave() {
   game.score = game.caveStartScore;           /* what he had when he entered this cave */
-  genCave(game.cave);
+  genPlayableCave(game.cave);
   game.state = 'play';
   stuckT = 0; stuckNow = false;
   game.msg = 'GRUBE ' + game.cave + ' FORFRA'; game.msgTimer = 1.8;
@@ -582,7 +602,7 @@ function heldDir() {
 function startCave() {
   game.caveStartScore = game.score;
   stuckT = 0; stuckNow = false;
-  genCave(game.cave);
+  genPlayableCave(game.cave);
   game.state = 'play';
   game.msg = 'GRUBE ' + game.cave + '  ·  ' + game.need + ' DIAMANTER';
   game.msgTimer = 2.2;
