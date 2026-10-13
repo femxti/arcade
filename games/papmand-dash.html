@@ -10,10 +10,39 @@
   html,body { height:100%; background:#000; overflow:hidden; touch-action:none; overscroll-behavior:none; }
   #wrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:#000; }
   canvas { display:block; image-rendering:pixelated; }
+
+  /* name entry for the top-10 list, shown over the game */
+  #entry { position:fixed; left:50%; top:14%; transform:translateX(-50%); width:min(300px, 86vw);
+           background:#10131c; border:2px solid #ffd21f; border-radius:14px; padding:18px 16px 16px;
+           font-family:"Courier New", monospace; color:#fff; text-align:center; z-index:5;
+           box-shadow:0 12px 40px rgba(0,0,0,0.7); }
+  #entry h2 { font-size:20px; color:#ffd21f; letter-spacing:0.06em; margin-bottom:4px; }
+  #entry p { font-size:13px; color:#c9d4e0; margin-bottom:12px; line-height:1.35; }
+  #entry input { width:100%; font:700 26px "Courier New", monospace; text-align:center; letter-spacing:0.12em;
+                 text-transform:uppercase; background:#000; color:#50dcff; border:2px solid #39d5ff;
+                 border-radius:10px; padding:8px 6px; outline:none; }
+  #entry input:focus { border-color:#ffd21f; }
+  #entry .err { min-height:18px; font-size:13px; color:#ff6b7f; margin:8px 0 4px; }
+  #entry .row { display:flex; gap:10px; }
+  #entry button { flex:1; font:700 15px "Courier New", monospace; border-radius:10px; padding:11px 6px; cursor:pointer; }
+  #entry .save { background:#ffd21f; color:#2a1a00; border:2px solid #b3802a; }
+  #entry .skip { background:transparent; color:#c9d4e0; border:2px solid #454d59; }
+  #entry button:focus-visible { outline:3px solid #50dcff; outline-offset:2px; }
+  [hidden] { display:none !important; }
 </style>
 </head>
 <body>
 <div id="wrap"><canvas id="game"></canvas></div>
+<form id="entry" hidden autocomplete="off">
+  <h2>NY TOPSCORE!</h2>
+  <p>Du kom på top 10 med <b id="entryScore">0</b> point.<br>Skriv dit navn (højst 8 tegn):</p>
+  <input id="entryName" maxlength="8" inputmode="text" autocapitalize="characters" spellcheck="false" aria-label="Dit navn">
+  <div class="err" id="entryErr" role="alert"></div>
+  <div class="row">
+    <button type="button" class="skip" id="entrySkip">SPRING OVER</button>
+    <button type="submit" class="save" id="entrySave">GEM</button>
+  </div>
+</form>
 <script>
 "use strict";
 /* ============================================================
@@ -114,11 +143,94 @@ const DPAD = [
 /* ---------------- game state ---------------- */
 const game = {
   state: 'title',        /* title | start | play | dead | clear | gameover */
-  score: 0, hi: 5000, lives: 3, cave: 1,
+  score: 0, hi: 1000, lives: 3, cave: 1,
   need: 10, got: 0, time: 120,
   timer: 0, msg: '', msgTimer: 0, flash: 0
 };
 let startRequested = false;
+
+/* ---------------- the top-10 list ----------------
+   SCORE_API is the address of the arcade's scoreboard on Cloudflare.
+   While it is empty, the list is kept on this phone only. */
+const SCORE_API = '';
+const BOARD_GAME = 'papmand', BOARD_KEY = 'papmand.board', BOARD_SIZE = 10, NAME_MAX = 8;
+let board = [], boardOnline = false, lastEntry = -1;
+
+/* the same rude-word rules as the scoreboard uses */
+const RUDE_INSIDE = ['FUCK','FCK','SHIT','CUNT','COCK','PUSSY','BITCH','WHORE','SLUT','PORN','PENIS','VAGINA',
+  'NIGG','NIGA','WANK','HITLER','NAZI','KKK','FISSE','KUSSE','LUDER','RØVHUL','ROEVHUL','PISSE','LORT','SPASSER','PATTER'];
+const RUDE_WHOLE = ['ASS','FAN','NAR','PIK','PIS','PISS','SEX','TITS','BOOB','BOOBS','DICK','RAPE','FAG','CRAP',
+  'KILL','DIE','DEAD','IDIOT','SATAN','BASTARD','HORE','KNEP','PULE','SKID','SVIN','BØSSE','BOESSE','RØV','ROEV',
+  'MØG','MOEG','KRYB','TISSE','BÆ','PRUT'];
+function isRudeName(name) {
+  const words = name.replace(/0/g,'O').replace(/1/g,'I').replace(/3/g,'E').replace(/4/g,'A')
+                    .replace(/5/g,'S').replace(/7/g,'T').replace(/8/g,'B').split(' ').filter(Boolean);
+  const squeezed = words.join('');
+  return RUDE_INSIDE.some(w => squeezed.includes(w)) || RUDE_WHOLE.includes(squeezed) || words.some(w => RUDE_WHOLE.includes(w));
+}
+function cleanName(raw) {
+  const n = (raw || '').normalize('NFC').toUpperCase().trim().replace(/\s+/g, ' ');
+  return (n.length >= 1 && n.length <= NAME_MAX && /^[A-Z0-9ÆØÅ ]+$/.test(n)) ? n : null;
+}
+
+function useBoard(list) {
+  if (!Array.isArray(list)) return;
+  board = list.filter(e => e && typeof e.n === 'string' && Number.isInteger(e.s))
+              .sort((a, b) => b.s - a.s).slice(0, BOARD_SIZE);
+  game.hi = Math.max(board.length ? board[0].s : 0, 1000);
+}
+function saveLocal() { try { localStorage.setItem(BOARD_KEY, JSON.stringify(board)); } catch (e) {} }
+function loadBoard() {
+  try { useBoard(JSON.parse(localStorage.getItem(BOARD_KEY) || '[]')); } catch (e) {}
+  if (!SCORE_API) return;
+  fetch(SCORE_API + '?game=' + BOARD_GAME, { cache: 'no-store' })
+    .then(r => r.ok ? r.json() : Promise.reject())
+    .then(list => { boardOnline = true; useBoard(list); saveLocal(); })
+    .catch(() => { boardOnline = false; });
+}
+const qualifies = sc => sc > 0 && (board.length < BOARD_SIZE || sc > board[board.length - 1].s);
+
+/* name entry */
+const entryEl = document.getElementById('entry'), entryName = document.getElementById('entryName'),
+      entryErr = document.getElementById('entryErr');
+function openEntry() {
+  game.entering = true;
+  document.getElementById('entryScore').textContent = game.score;
+  entryName.value = ''; entryErr.textContent = '';
+  entryEl.hidden = false;
+  setTimeout(() => entryName.focus(), 50);
+}
+function closeEntry() { entryEl.hidden = true; game.entering = false; entryName.blur(); }
+entryName.addEventListener('input', () => {
+  /* only letters, digits and spaces, in capitals */
+  const v = entryName.value.toUpperCase().replace(/[^A-Z0-9ÆØÅ ]/g, '').slice(0, NAME_MAX);
+  if (v !== entryName.value) entryName.value = v;
+  entryErr.textContent = '';
+});
+document.getElementById('entrySkip').addEventListener('click', closeEntry);
+entryEl.addEventListener('submit', e => {
+  e.preventDefault();
+  const name = cleanName(entryName.value);
+  if (!name) { entryErr.textContent = 'Skriv mindst ét bogstav'; return; }
+  if (isRudeName(name)) { entryErr.textContent = 'Find et pænere navn'; return; }
+  const entry = { n: name, s: game.score };
+  board.push(entry); board.sort((a, b) => b.s - a.s); board = board.slice(0, BOARD_SIZE);
+  lastEntry = board.indexOf(entry);
+  game.hi = Math.max(game.hi, board[0].s);
+  saveLocal();
+  closeEntry();
+  if (!SCORE_API) return;
+  fetch(SCORE_API, { method: 'POST', headers: { 'content-type': 'application/json' },
+                     body: JSON.stringify({ game: BOARD_GAME, name, score: entry.s }) })
+    .then(r => r.ok ? r.json() : Promise.reject())
+    .then(list => {
+      boardOnline = true; useBoard(list); saveLocal();
+      lastEntry = board.findIndex(e => e.n === name && e.s === entry.s);
+    })
+    .catch(() => { boardOnline = false; });
+});
+/* keep game taps from reaching the canvas while typing */
+entryEl.addEventListener('pointerdown', e => e.stopPropagation());
 let stuckT = 0, stuckCheckT = 0, stuckNow = false;   /* how long he has been shut in with no way out */
 const RESET_BTN = { w: 236, h: 42 };                  /* drawn near the bottom of the cave window */
 
@@ -372,7 +484,7 @@ function digAgain() {
   stopMarch();
   if (game.state === 'gameover') { startRequested = true; return; }
   if (game.lives > 1) { game.lives--; startCave(); }
-  else { game.lives = 0; game.state = 'gameover'; }
+  else { game.lives = 0; game.state = 'gameover'; lastEntry = -1; if (qualifies(game.score)) openEntry(); }
 }
 function restartSameCave() {
   game.score = game.caveStartScore;           /* what he had when he entered this cave */
@@ -443,7 +555,7 @@ canvas.addEventListener('pointerdown', e => {
     }
   }
   input.active = true; input.x = p.x; input.y = p.y;
-  if (game.state === 'title' || game.state === 'gameover') startRequested = true;
+  if (game.state === 'title' || (game.state === 'gameover' && !game.entering)) startRequested = true;
   e.preventDefault();
 });
 canvas.addEventListener('pointermove', e => {
@@ -483,7 +595,8 @@ function update(dt) {
   if (game.state === 'title' || game.state === 'gameover') {
     if (startRequested) {
       startRequested = false;
-      game.score = 0; game.lives = 3; game.cave = 1;
+      game.score = 0; game.lives = 3; game.cave = 1; lastEntry = -1;
+      loadBoard();          /* pick up any new scores from other players */
       startCave();
     }
     return;
@@ -1281,6 +1394,24 @@ function draw(dt) {
   drawOverlays(t);
 }
 
+/* the top-10 list, ranked, with the newest entry lit up */
+function drawBoardList(y0) {
+  ctx.fillStyle = 'rgba(16,19,28,0.96)';
+  ctx.beginPath(); ctx.roundRect(W/2 - 140, y0 - 14, 280, 26 + BOARD_SIZE * 21 + 14, 12); ctx.fill();
+  text('TOP 10', W/2, y0, 13, '#ffd21f');
+  text(boardOnline ? 'alle spillere' : (SCORE_API ? 'offline · på denne telefon' : 'på denne telefon'),
+       W/2, y0 + 15, 9, '#8f88a8');
+  for (let i = 0; i < BOARD_SIZE; i++) {
+    const y = y0 + 36 + i * 21, e = board[i];
+    const me = i === lastEntry;
+    if (me) { ctx.fillStyle = 'rgba(255,210,31,0.18)'; ctx.fillRect(W/2 - 128, y - 10, 256, 20); }
+    const col = me ? '#ffd21f' : (i < 3 ? '#50dcff' : '#c9d4e0');
+    text(String(i + 1).padStart(2, ' ') + '.', W/2 - 100, y, 12, col, 'right');
+    text(e ? e.n : '--------', W/2 - 88, y, 12, e ? col : '#454d59', 'left');
+    text(e ? String(e.s).padStart(6, ' ') : '', W/2 + 118, y, 12, col, 'right');
+  }
+}
+
 /* the big yellow button near the bottom of the cave window */
 function drawYellowButton(label, a, t) {
   {
@@ -1319,6 +1450,7 @@ function drawOverlays(t) {
     drawTile(T.ROCK, W/2-106, H*0.44, 1, 1, t);  text('pas på faldende sten', W/2-56, H*0.44+18, 11, '#c9d4e0', 'left');
     drawTile(T.FLY, W/2-106, H*0.50, 2, 2, t);   text('undgå bomberne', W/2-56, H*0.50+18, 11, '#ff8c1a', 'left');
     drawTile(T.EXITO, W/2-106, H*0.56, 1, 1, t); text('find den blinkende udgang', W/2-56, H*0.56+18, 11, '#ffd21f', 'left');
+    if (board.length) text('REKORD: ' + board[0].n + '  ' + board[0].s, W/2, H*0.637, 12, '#ffd21f');
     if (Math.floor(performance.now()/500) % 2 === 0)
       text('TRYK FOR AT STARTE', W/2, H*0.68, 16, '#ffffff');
     text('brug pilene forneden', W/2, H*0.745, 11, '#c9d4e0');
@@ -1329,12 +1461,12 @@ function drawOverlays(t) {
   if (game.state === 'gameover') {
     ctx.fillStyle = 'rgba(0,0,10,0.6)';
     ctx.fillRect(0, 0, W, H);
-    text('GAME OVER', W/2, H*0.4, 28, '#ff2244');
-    text('SCORE  ' + game.score, W/2, H*0.48, 16, '#ffffff');
-    text('GRUBE ' + game.cave, W/2, H*0.53, 12, '#39d5ff');
-    if (game.score >= game.hi) text('NY REKORD!', W/2, H*0.58, 13, '#ffd21f');
-    if (Math.floor(performance.now()/500) % 2 === 0)
-      text('TRYK FOR AT PRØVE IGEN', W/2, H*0.66, 14, '#ffffff');
+    text('GAME OVER', W/2, H*0.12, 28, '#ff2244');
+    text('SCORE ' + game.score + '  ·  GRUBE ' + game.cave, W/2, H*0.175, 13, '#ffffff');
+    if (lastEntry === 0) text('NY REKORD!', W/2, H*0.215, 13, '#ffd21f');
+    drawBoardList(H*0.27);
+    if (!game.entering && Math.floor(performance.now()/500) % 2 === 0)
+      text('TRYK FOR AT PRØVE IGEN', W/2, H*0.685, 14, '#ffffff');
   }
 
   /* "Grav igen": dig again, from the grave or from game over */
@@ -1344,6 +1476,7 @@ function drawOverlays(t) {
 }
 
 /* ---------------- loop ---------------- */
+loadBoard();
 genCave(1);          /* background for the title screen */
 game.state = 'title';
 let last = performance.now();
