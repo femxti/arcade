@@ -58,6 +58,8 @@ function beep(freq, dur, type, vol, slide) {
   o.connect(g); g.connect(AC.destination);
   o.start(t); o.stop(t + dur + 0.02);
 }
+let marchTimers = [];
+function stopMarch() { marchTimers.forEach(clearTimeout); marchTimers = []; }
 const sfx = {
   dig:   () => beep(rnd(140,190), 0.05, 'triangle', 0.06, -60),
   gem:   () => beep(rnd(900,1300), 0.1, 'square', 0.05, 300),
@@ -75,11 +77,11 @@ const sfx = {
     let at = 0;
     for (const [f, len] of tune) {
       const when = at * b * 1000;
-      setTimeout(() => { beep(f, len * b * 0.95, 'triangle', 0.1); beep(f * 2, len * b * 0.6, 'sine', 0.025); }, when);
+      marchTimers.push(setTimeout(() => { beep(f, len * b * 0.95, 'triangle', 0.1); beep(f * 2, len * b * 0.6, 'sine', 0.025); }, when));
       at += len;
     }
     for (let k = 0; k < Math.ceil(at); k++)          /* the tolling left hand: one chord per beat */
-      setTimeout(() => { beep(BASS, b * 0.9, 'sine', 0.07); beep(BASS5, b * 0.7, 'sine', 0.035); }, k * b * 1000);
+      marchTimers.push(setTimeout(() => { beep(BASS, b * 0.9, 'sine', 0.07); beep(BASS5, b * 0.7, 'sine', 0.035); }, k * b * 1000));
   },
   wobble:() => beep(180, 0.06, 'triangle', 0.05, 40),
   open:  () => { beep(523,0.09,'square',0.07); setTimeout(()=>beep(659,0.09,'square',0.07),90); setTimeout(()=>beep(784,0.09,'square',0.07),180); setTimeout(()=>beep(1046,0.18,'square',0.07),270); },
@@ -361,6 +363,16 @@ function resetBtnRect() {
   return { x: (W - RESET_BTN.w) / 2, y: HUD + VH - RESET_BTN.h - 14, w: RESET_BTN.w, h: RESET_BTN.h };
 }
 function resetVisible() { return game.state === 'play' && stuckT > 1.2; }
+/* "Grav igen": on the grave screen, once the cross is up; and on game over */
+function digAgainVisible() {
+  return (game.state === 'dead' && player.mourned && player.deadT > 1.2) || game.state === 'gameover';
+}
+function digAgain() {
+  stopMarch();
+  if (game.state === 'gameover') { startRequested = true; return; }
+  if (game.lives > 1) { game.lives--; startCave(); }
+  else { game.lives = 0; game.state = 'gameover'; }
+}
 function restartSameCave() {
   game.score = game.caveStartScore;           /* what he had when he entered this cave */
   genCave(game.cave);
@@ -422,10 +434,11 @@ function pt(e) {
 canvas.addEventListener('pointerdown', e => {
   audio();
   const p = pt(e);
-  if (resetVisible()) {
+  if (resetVisible() || digAgainVisible()) {
     const r = resetBtnRect();
     if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) {
-      restartSameCave(); e.preventDefault(); return;
+      if (resetVisible()) restartSameCave(); else digAgain();
+      e.preventDefault(); return;
     }
   }
   input.active = true; input.x = p.x; input.y = p.y;
@@ -485,10 +498,7 @@ function update(dt) {
       if (!expl.length) player.deadT = 0;    /* the grave rises once the smoke is gone */
     }
     if (!expl.length && !player.mourned) { player.mourned = true; player.deadT = 0; sfx.march(); }
-    if (game.timer <= 0) {
-      if (game.lives > 1) { game.lives--; startCave(); }
-      else { game.lives = 0; game.state = 'gameover'; }
-    }
+    if (game.timer <= 0) digAgain();
   }
 
   if (game.state === 'clear') {
@@ -1266,9 +1276,14 @@ function draw(dt) {
   }
 
   /* the reset button, only when he has walled himself in */
-  if (resetVisible()) {
+  if (resetVisible()) drawYellowButton('LUKKET INDE? PRØV IGEN', Math.min(1, (stuckT - 1.2) * 3), t);
+  drawOverlays(t);
+}
+
+/* the big yellow button near the bottom of the cave window */
+function drawYellowButton(label, a, t) {
+  {
     const r = resetBtnRect();
-    const a = Math.min(1, (stuckT - 1.2) * 3);
     const pulse = 1 + Math.sin(t * 5) * 0.03;
     ctx.save();
     ctx.globalAlpha = a;
@@ -1286,9 +1301,12 @@ function draw(dt) {
     ctx.beginPath(); ctx.moveTo(-r.w / 2 + 35, -9); ctx.lineTo(-r.w / 2 + 37, 1); ctx.lineTo(-r.w / 2 + 28, -3); ctx.closePath(); ctx.fill();
     ctx.font = '700 13px "Courier New", monospace';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('LUKKET INDE? PRØV IGEN', 14, 1);
+    ctx.fillText(label, 14, 1);
     ctx.restore();
   }
+}
+
+function drawOverlays(t) {
 
   if (game.state === 'title') {
     ctx.fillStyle = 'rgba(0,0,10,0.6)';
@@ -1314,8 +1332,12 @@ function draw(dt) {
     text('SCORE  ' + game.score, W/2, H*0.48, 16, '#ffffff');
     text('GRUBE ' + game.cave, W/2, H*0.53, 12, '#39d5ff');
     if (game.score >= game.hi) text('NY REKORD!', W/2, H*0.58, 13, '#ffd21f');
-    if (Math.floor(performance.now()/500) % 2 === 0)
-      text('TRYK FOR AT PRØVE IGEN', W/2, H*0.66, 14, '#ffffff');
+  }
+
+  /* "Grav igen": dig again, from the grave or from game over */
+  if (digAgainVisible()) {
+    const a = game.state === 'gameover' ? 1 : Math.min(1, (player.deadT - 1.2) * 3);
+    drawYellowButton('GRAV IGEN', a, t);
   }
 }
 
