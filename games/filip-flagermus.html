@@ -239,14 +239,15 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
 
   let state = 'menu'; // menu | play | over
   let fires = [], hawks = [], hawkT = 0, hawksHit = 0, winT = 0, confetti = [];
+  const BREAK = 34;   // a falling stalactite always snaps this far above its tip
   const ROCK_G = 0.3; // gravity for falling stalactites: slower than real, so kids can react
-  let rocks = [];   // stalactites that have snapped off and are on their way down
+  let rocks = [], brittleCount = 0;   // stalactites that have snapped off and are on their way down
   let kissT = 0, poisoned = 0, edgeCd = 0, suitors = [], suitorT = 0;
   let bat, obs, moths, bananas, flies, bees, owls, sinceBanana, sinceBee, sinceOwl, made, level, P, speed, passed, banner, flash, parts, rings, score, lives, invuln, t, scrollX, shake;
 
   function reset() {
     bat = { x: 170, y: H * 0.45, vy: 0, flapT: 0 };
-    obs = []; moths = []; bananas = []; flies = []; bees = []; owls = []; sinceBanana = 0; sinceBee = 0; sinceOwl = 0; made = 0;
+    obs = []; moths = []; bananas = []; flies = []; bees = []; owls = []; sinceBanana = 0; sinceBee = 0; sinceOwl = 0; made = 0; brittleCount = 0;
     level = 0; P = LEVELS[0]; speed = P.speed; passed = 0; banner = null; flash = 0; parts = []; rings = [];
     rocks = [];
     poisoned = 0; edgeCd = 0; suitors = []; suitorT = 0; fires = []; hawks = []; hawkT = 0; hawksHit = 0; winT = 0; confetti = []; score = 0; lives = LIVES; invuln = 0; t = 0; scrollX = 0; shake = 0;
@@ -268,7 +269,11 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
     // a brittle stalactite: it will crack and drop when Filip comes near.
     // Its gap is kept empty (no moth, banana or butterfly), so nothing blocks the fall.
     // The 3rd rock of every level always crumbles, so it's seen early.
-    const brittle = !spider && (made === 2 || (made > 2 && Math.random() < (P.crumble || 0)));
+    // Only stalactites long enough to snap near the tip (with room left above) may crumble.
+    const longEnough = (gy - gap / 2) - BREAK >= CEIL + 14;
+    const brittle = !spider && longEnough &&
+      ((made >= 2 && brittleCount === 0) || (made > 2 && Math.random() < (P.crumble || 0)));
+    if (brittle) brittleCount++;
     obs.push({ x, gy, gap, passed: false, seed, drip: !spider && Math.random() < 0.2, spider,
                brittle, crackT: 0, fallen: false });
     // a fat killer bee hovers in the open space before this formation (never in the first ones)
@@ -458,7 +463,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
   }
 
   function levelUp() {
-    level++; suitorT = 240; P = LEVELS[level]; made = 0; sinceBee = 0; sinceOwl = 0;
+    level++; suitorT = 240; P = LEVELS[level]; made = 0; brittleCount = 0; sinceBee = 0; sinceOwl = 0;
     banner = { life: 200, lvl: level }; flash = 40;
     if (P.boss) { owls = []; suitors = []; bees = []; for (const o of obs) o.spider = null; hawkT = 200; }
     if (lives < MAX_LIVES) lives++;
@@ -507,7 +512,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
             o.crackT++;
             if (o.crackT > warn) {
               o.fallen = true;
-              rocks.push({ x: cx, y: o.gy - o.gap / 2 - 18, vy: 0, rot: 0,
+              rocks.push({ x: cx, y: o.gy - o.gap / 2 - BREAK / 2, vy: 0, rot: 0,
                            vr: (Math.random() - 0.5) * 0.12, seed: o.seed,
                            land: o.gy + o.gap / 2 });
               sfx.crash();
@@ -539,7 +544,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
         r.y += r.vy;
         r.rot += r.vr;
         if (invuln === 0 && !r.done &&
-            Math.abs(r.x - bat.x) < 13 + HIT_R && Math.abs(r.y - bat.y) < 17 + HIT_R) {
+            Math.abs(r.x - bat.x) < 11 + HIT_R && Math.abs(r.y - bat.y) < 12 + HIT_R) {
           r.done = true; hurt('Rock!');
         }
         if (!r.done && r.y > r.land) {        // it shatters on the stalagmite below
@@ -759,7 +764,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
       jag(0, top, 1);   // stalactite from ceiling
       if (o.crackT > 0) {
         // a crack opens across the root
-        const cy = Math.max(CEIL + 6, top - 52);
+        const cy = Math.max(CEIL + 6, top - BREAK);
         ctx.strokeStyle = 'rgba(10,6,16,0.9)'; ctx.lineWidth = 2.5;
         ctx.beginPath();
         ctx.moveTo(cx - hw + 2, cy);
@@ -782,7 +787,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
     } else {
       // a stub is left on the ceiling where it broke away
       ctx.fillStyle = P.pal.rock[2];
-      const sy = Math.max(CEIL + 6, top - 52);
+      const sy = Math.max(CEIL + 6, top - BREAK);
       ctx.beginPath();
       ctx.moveTo(cx - hw, 0); ctx.lineTo(cx + hw, 0);
       ctx.lineTo(cx + hw - 4, sy + 2); ctx.lineTo(cx + hw * 0.3, sy - 6);
@@ -807,6 +812,7 @@ button.go:focus-visible { outline: 3px solid var(--moss); outline-offset: 3px; }
     ctx.save();
     ctx.translate(r.x, r.y);
     ctx.rotate(r.rot);
+    ctx.scale(0.8, 0.6);   // just the tip piece, about BREAK px tall
     const hw = OBW / 2 - 4;
     const g = ctx.createLinearGradient(-hw, 0, hw, 0);
     const rc = P.pal.rock;
