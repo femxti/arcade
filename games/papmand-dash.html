@@ -150,6 +150,21 @@ const game = {
 };
 let startRequested = false;
 
+/* ---------------- settings: time limit on/off ----------------
+   Switched on the title and game-over screens, remembered on this device.
+   With the time limit off the clock never runs out, and there is no time bonus. */
+const TIMER_KEY = 'papmand.timer';
+let timerOn = true;
+try { timerOn = localStorage.getItem(TIMER_KEY) !== 'off'; } catch (e) {}
+function toggleTimer() {
+  timerOn = !timerOn;
+  try { localStorage.setItem(TIMER_KEY, timerOn ? 'on' : 'off'); } catch (e) {}
+  beep(timerOn ? 880 : 440, 0.08, 'square', 0.06);
+}
+const TIMER_BTN = { w: 220, h: 38, cy: H * 0.885 };
+const timerBtnRect = () => ({ x: W/2 - TIMER_BTN.w/2, y: TIMER_BTN.cy - TIMER_BTN.h/2, w: TIMER_BTN.w, h: TIMER_BTN.h });
+const timerBtnVisible = () => game.state === 'title' || (game.state === 'gameover' && !game.entering);
+
 /* ---------------- the top-10 list ----------------
    SCORE_API is the address of the arcade's scoreboard on Cloudflare.
    While it is empty, the list is kept on this phone only. */
@@ -550,10 +565,10 @@ function tryMove(dx, dy) {
     stepTo(nx,ny);
     game.state = 'clear';
     game.timer = 2.2;
-    const bonus = Math.floor(game.time) * 2;
+    const bonus = timerOn ? Math.floor(game.time) * 2 : 0;
     game.score += bonus;
     if (game.score > game.hi) game.hi = game.score;
-    game.msg = 'GRUBE KLARET  +' + bonus; game.msgTimer = 2.2;
+    game.msg = bonus ? 'GRUBE KLARET  +' + bonus : 'GRUBE KLARET'; game.msgTimer = 2.2;
     sfx.clear();
   }
 }
@@ -573,6 +588,12 @@ canvas.addEventListener('pointerdown', e => {
     if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) {
       if (resetVisible()) restartSameCave(); else digAgain();
       e.preventDefault(); return;
+    }
+  }
+  if (timerBtnVisible()) {
+    const r = timerBtnRect();
+    if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) {
+      toggleTimer(); e.preventDefault(); return;
     }
   }
   input.active = true; input.x = p.x; input.y = p.y;
@@ -642,12 +663,14 @@ function update(dt) {
   }
 
   if (game.state === 'play') {
-    /* countdown */
-    const before = Math.ceil(game.time);
-    game.time -= dt;
-    const now = Math.ceil(game.time);
-    if (now <= 10 && now !== before && now > 0) sfx.tick();
-    if (game.time <= 0) { game.time = 0; killPlayer(true); }
+    /* countdown (unless the time limit is switched off) */
+    if (timerOn) {
+      const before = Math.ceil(game.time);
+      game.time -= dt;
+      const now = Math.ceil(game.time);
+      if (now <= 10 && now !== before && now > 0) sfx.tick();
+      if (game.time <= 0) { game.time = 0; killPlayer(true); }
+    }
 
     /* stepped movement while an arrow is held */
     moveT -= dt;
@@ -1340,8 +1363,12 @@ function draw(dt) {
   text(game.got + '/' + game.need, 32, 20, 14, quota ? '#ffd21f' : '#ffffff', 'left');
 
   /* time */
-  const tCol = game.time < 15 ? (Math.floor(t*4)%2 ? '#ff2244' : '#ff8c1a') : '#ffffff';
-  text('TID ' + Math.ceil(game.time), W/2, 20, 13, tCol);
+  if (timerOn) {
+    const tCol = game.time < 15 ? (Math.floor(t*4)%2 ? '#ff2244' : '#ff8c1a') : '#ffffff';
+    text('TID ' + Math.ceil(game.time), W/2, 20, 13, tCol);
+  } else {
+    text('UDEN TID', W/2, 20, 13, '#8f88a8');
+  }
 
   /* score */
   text(('' + game.score).padStart(6,'0'), W - 12, 20, 13, '#ffffff', 'right');
@@ -1488,6 +1515,23 @@ function drawOverlays(t) {
     drawBoardList(H*0.27);
     if (!game.entering && Math.floor(performance.now()/500) % 2 === 0)
       text('TRYK FOR AT PRØVE IGEN', W/2, H*0.685, 14, '#ffffff');
+  }
+
+  /* the time-limit switch */
+  if (timerBtnVisible()) {
+    const r = timerBtnRect();
+    ctx.fillStyle = '#10131c';
+    ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, 10); ctx.fill();
+    ctx.strokeStyle = timerOn ? '#39d5ff' : '#8f88a8'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, 9); ctx.stroke();
+    ctx.lineWidth = 1;
+    text('TIDSGRÆNSE:', r.x + 14, TIMER_BTN.cy, 13, '#c9d4e0', 'left');
+    /* a little on/off pill */
+    const sx = r.x + r.w - 64, sy = TIMER_BTN.cy - 11;
+    ctx.fillStyle = timerOn ? '#2e7d4a' : '#454d59';
+    ctx.beginPath(); ctx.roundRect(sx, sy, 52, 22, 11); ctx.fill();
+    text(timerOn ? 'TIL' : 'FRA', sx + 26, TIMER_BTN.cy + 1, 12, '#ffffff');
+    if (!timerOn) text('ingen tidsbonus', W/2, r.y + r.h + 12, 10, '#8f88a8');
   }
 
   /* "Grav igen": dig again, from the grave or from game over */
