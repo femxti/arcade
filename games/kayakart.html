@@ -256,7 +256,7 @@ h1,h2,h3{font-family:var(--display);font-weight:400;margin:0;text-wrap:balance;l
       <button class="btn" id="resume">Resume</button>
       <button class="btn alt" id="calib">Calibrate steering</button>
       <button class="btn alt" id="invert">Invert steering</button>
-      <button class="btn alt" id="assist">Steering help: On</button>
+      <button class="btn alt" id="assist">Steering help: Some</button>
       <button class="btn alt" id="sound">Sound: on</button>
       <button class="btn alt" id="gfx">Graphics: High</button>
       <button class="btn alt" id="quit">Quit race</button>
@@ -652,7 +652,7 @@ function buildTrack(key){
   ribbon(0,N,j=>side(j,-W,0),j=>{const s=side(j,-W-.4,0);s[1]=def.base;return s;},8,skM);
   ribbon(0,N,j=>side(j,W,0),j=>{const s=side(j,W+.4,0);s[1]=def.base;return s;},8,skM);
   // soft bumpers when steering help is on
-  if(save.assist!==false){t.bumpers=true;
+  if(EASY()){t.bumpers=true;
     const bT=ctex(16,64,(c,w,h)=>{for(let y=0;y<h;y+=16){c.fillStyle=(y/16)%2?(harbor?'#f4f1ea':'#fff6fb'):(harbor?'#e3262e':'#ff6fb5');c.fillRect(0,y,w,16);}},true);bT.__own=1;
     const bM=new THREE.MeshStandardMaterial({map:bT,roughness:.45,side:THREE.DoubleSide});bM.__own=1;
     [-1,1].forEach(sg=>{ribbon(0,N,j=>side(j,sg*(W-.1),0),j=>side(j,sg*(W-.1),.65),3,bM);ribbon(0,N,j=>side(j,sg*(W-.1),.65),j=>side(j,sg*(W+.3),.65),3,bM);});}
@@ -861,7 +861,7 @@ function readSteer(dt){
   let s=0;const k=input.keys;
   if(k.ArrowLeft||k.KeyA)s-=1;if(k.ArrowRight||k.KeyD)s+=1;
   const tiltLive=tilt.active&&performance.now()-tilt.last<800;
-  if(s===0&&tiltLive&&tilt.a0!=null){let r=wrapA(tilt.ang-tilt.a0);if(save.invert)r=-r;const deg=r*180/Math.PI;const ez=save.assist!==false,dz=ez?4:2,rg=ez?30:25,mm=Math.max(0,Math.abs(deg)-dz)/rg;s=Math.sign(deg)*Math.min(1,ez?Math.pow(mm,1.35):mm);}
+  if(s===0&&tiltLive&&tilt.a0!=null){let r=wrapA(tilt.ang-tilt.a0);if(save.invert)r=-r;const deg=r*180/Math.PI;const ez=EASY(),dz=ez?4:2,rg=ez?30:25,mm=Math.max(0,Math.abs(deg)-dz)/rg;s=Math.sign(deg)*Math.min(1,ez?Math.pow(mm,1.35):mm);}
   input.steer=lerp(input.steer,s,1-Math.exp(-14*dt));
 }
 const isTouch=matchMedia('(pointer:coarse)').matches;
@@ -1005,12 +1005,12 @@ function updateKart(k,dt,racing){
     syncModel(k,dt);return;}
   let steer=0,drift=false,gas=racing&&!k.finished;
   if(k.isP&&!k.finished){gas=gas&&(input.gasTouch||!!input.keys.ArrowUp||!!input.keys.KeyW);if(racing&&state==='race')autoItem(k,dt);}
-  if(k.isP){steer=input.steer;drift=input.drift;if(EASY()&&racing&&!k.finished&&k.spin<=0&&k.gum<=0){const as=assistSteer(k);const w=1-Math.min(1,Math.abs(steer)*1.3)*.55;steer=clamp(steer*.8+as*w,-1,1);}}
+  if(k.isP){steer=input.steer;drift=input.drift;if(EASY()&&racing&&!k.finished&&k.spin<=0&&k.gum<=0){const L=ALVL();const as=assistSteer(k)*(L===2?1:.22);const w=1-Math.min(1,Math.abs(steer)*1.3)*(L===2?.55:.8);steer=clamp(steer*(L===2?.8:.95)+as*w,-1,1);}}
   else if(racing&&!k.finished){const o=ai(k,dt);steer=o.steer;drift=o.drift;}
   if(k.finished){steer=ai(k,dt).steer;gas=true;}
   let top=r.top;
-  if(k.isP&&EASY()){let cm=0;for(let o=4;o<36;o+=4)cm=Math.max(cm,Math.abs(t.cv[(k.idx+o)%t.N]));if(cm>.35)top*=1-Math.min(.22,(cm-.35)*.5);}
-  if(!k.isP){top*=EASY()?.95:.97;const gap=(k.prog-player.prog)/t.N;if(gap>.12)top*=.9;else if(gap<-.08)top*=1.07;}
+  if(k.isP&&ALVL()===2){let cm=0;for(let o=4;o<36;o+=4)cm=Math.max(cm,Math.abs(t.cv[(k.idx+o)%t.N]));if(cm>.35)top*=1-Math.min(.22,(cm-.35)*.5);}
+  if(!k.isP){top*=ALVL()===2?.95:.97;const gap=(k.prog-player.prog)/t.N;if(gap>(ALVL()===2?.12:.2))top*=ALVL()===2?.9:.94;else if(gap<-.08)top*=1.07;}
   else top*=1+Math.min(raceCoins,10)*.01;
   const off=Math.abs(k.lat)>t.halfW;
   if(off&&k.apple<=0&&k.heart<=0)top*=k.isP&&EASY()?.85:.55;
@@ -1048,7 +1048,7 @@ function updateKart(k,dt,racing){
   // edge: soft bumpers (steering help) or fall
   if(t.bumpers&&Math.abs(k.lat)>t.W-1.2&&k.gum<=0){const sg=Math.sign(k.lat),nx=-t.tz[k.idx]*sg,nz=t.tx[k.idx]*sg,ov=Math.abs(k.lat)-(t.W-1.2);
     k.pos.x-=nx*ov;k.pos.z-=nz*ov;k.lat=sg*(t.W-1.2);const vn=k.vel.x*nx+k.vel.z*nz;if(vn>0){k.vel.x-=nx*vn*1.6;k.vel.z-=nz*vn*1.6;}
-    k.heading+=wrapA(headingAt(t,k.idx)-k.heading)*.25;k.speed*=.99;if(k.isP&&vn>5){sfx.bump();shake=Math.max(shake,.12);}}
+    k.heading+=wrapA(headingAt(t,k.idx)-k.heading)*(ALVL()===2?.25:.12);k.speed*=vn>2?.93:.995;if(k.isP&&vn>5){sfx.bump();shake=Math.max(shake,.12);}}
   else if(Math.abs(k.lat)>t.W+.3&&!k.air&&k.gum<=0){k.falling=.9;k.vy=2;k.splashed=false;k.boost=k.apple=0;if(k.isP){banner(t.def.splash);sfx.splash();}return;}
   if(Math.abs(k.lat)>t.W+.3&&k.gum>0){const s=Math.sign(k.lat);k.pos.x-=(-t.tz[k.idx])*s*.5;k.pos.z-=t.tx[k.idx]*s*.5;}
   // ramps
@@ -1293,9 +1293,9 @@ function pauseGame(){state='paused';show('pause');$('#pnote').textContent='';if(
 function resumeGame(){state='race';show('hud');if(eng)eng.g.gain.setTargetAtTime(.05,AC.currentTime,.1);last=performance.now();}
 $('#btnPause').onclick=pauseGame;$('#resume').onclick=resumeGame;
 $('#calib').onclick=()=>{calibrate();$('#pnote').textContent=tilt.active?'Rattet er nulstillet. Hold telefonen, som du vil køre ligeud.':'Ingen bevægelsessensor fundet. Åbn spillet fra din arcade på telefonen og tryk Allow motion.';};
-const EASY=()=>save.assist!==false;
-function assistLabel(){$('#assist').textContent='Steering help: '+(EASY()?'On':'Off');}
-$('#assist').onclick=()=>{save.assist=!EASY();store();assistLabel();$('#pnote').textContent=EASY()?'Styrehjælpen er slået til. Kanterne bliver bløde fra næste løb.':'Styrehjælpen er slået fra. Fra næste løb kan man køre i vandet igen.';};assistLabel();
+const ALVL=()=>save.assistLvl!=null?save.assistLvl:(save.assist===false?0:1);const EASY=()=>ALVL()>0;
+function assistLabel(){$('#assist').textContent='Steering help: '+['Off','Some','Max'][ALVL()];}
+$('#assist').onclick=()=>{const l=ALVL();save.assistLvl=l===0?2:l-1;store();assistLabel();$('#pnote').textContent=['Ingen styrehjælp. Fra næste løb kan man køre i vandet igen.','Lidt styrehjælp: bilen hjælper en smule, men du styrer selv.','Meget styrehjælp: bilen styrer næsten selv og bremser før sving.'][ALVL()];};assistLabel();
 $('#invert').onclick=()=>{save.invert=!save.invert;store();$('#pnote').textContent=save.invert?'Styreretningen er byttet om.':'Styreretningen er normal.';};
 $('#sound').onclick=()=>setSound(!save.sound);setSound(save.sound);
 $('#quit').onclick=()=>menu('title');
