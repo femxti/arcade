@@ -159,6 +159,16 @@ h1,h2,h3{font-family:var(--display);font-weight:400;margin:0;text-wrap:balance;l
 #minimap{filter:drop-shadow(0 4px 12px rgba(0,0,0,.5))}
 .results .n{font-family:var(--hud);font-weight:900;font-style:italic}
 @media (max-height:430px){#speedo{width:120px;height:75px}#btnGas{width:66px;height:90px}.place{font-size:54px}}
+.opts{display:grid;gap:10px;width:100%;max-width:540px}
+.opt{display:flex;align-items:center;gap:14px;text-align:left;padding:12px 16px;border-radius:16px;border:2px solid var(--line);background:var(--glass);color:var(--cream);cursor:pointer;font-family:var(--body);min-width:0}
+.opt svg{flex:none}
+.opt .ot{display:flex;flex-direction:column;gap:2px;min-width:0}
+.opt b{font-family:var(--hud);font-weight:900;font-style:italic;font-size:22px;text-transform:uppercase;letter-spacing:.01em}
+.opt .ot>span{font-size:14px;font-weight:700;line-height:1.35;opacity:.85}
+.opt[aria-checked="true"]{border-color:var(--sun);background:rgba(255,200,58,.16);box-shadow:0 0 0 3px rgba(255,200,58,.22)}
+.opt[aria-checked="true"] b::after{content:"  \2713";color:var(--sun)}
+.opt:focus-visible{outline:3px solid var(--sun);outline-offset:3px}
+@media (max-height:430px){#settings h2{font-size:28px!important}#settings .tag{display:none}#settings{gap:10px}.opts{gap:7px}.opt{padding:7px 14px}.opt b{font-size:18px}.opt .ot>span{font-size:12px}.opt svg{width:34px;height:34px}}
 </style>
 
 <canvas id="game" aria-label="KayaKart racerbane"></canvas>
@@ -173,6 +183,7 @@ h1,h2,h3{font-family:var(--display);font-weight:400;margin:0;text-wrap:balance;l
     <div class="row">
       <button class="btn" id="goSelect">Race!</button>
       <button class="btn alt" id="goGarage">Garage</button>
+      <button class="btn alt" id="goSettings">Styring</button>
       <button class="btn alt" id="goHow">How to play</button>
     </div>
     <p id="rotate">Vend telefonen på langs for den bedste oplevelse</p>
@@ -210,6 +221,18 @@ h1,h2,h3{font-family:var(--display);font-weight:400;margin:0;text-wrap:balance;l
       <div class="note" id="gnote"></div>
       <div class="row" style="justify-content:flex-start"><button class="btn small" data-back>Done</button></div>
     </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section class="screen dim" id="settings" hidden>
+    <h2 style="font-size:40px">Styring</h2>
+    <p class="tag">Hvor meget skal bilen hjælpe med at styre?</p>
+    <div class="opts" role="radiogroup" aria-label="Styring">
+      <button class="opt" id="opt-2" data-lvl="2" role="radio" aria-checked="false"><svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true"><circle cx="22" cy="22" r="17" fill="none" stroke="#46d39f" stroke-width="5"/><circle cx="22" cy="22" r="5" fill="#46d39f"/><path d="M22 22 L7 19 M22 22 L37 19 M22 22 L22 39" stroke="#46d39f" stroke-width="4" stroke-linecap="round"/><path d="M33 4 l2 4 4 1 -3 3 1 4 -4 -2 -4 2 1 -4 -3 -3 4 -1z" fill="#ffc83a"/></svg><span class="ot"><b>Auto-auto</b><span>Bilen styrer næsten selv og bremser før svingene. God til de mindste.</span></span></button>
+      <button class="opt" id="opt-1" data-lvl="1" role="radio" aria-checked="false"><svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true"><circle cx="22" cy="22" r="17" fill="none" stroke="#ffc83a" stroke-width="5"/><circle cx="22" cy="22" r="5" fill="#ffc83a"/><path d="M22 22 L7 19 M22 22 L37 19 M22 22 L22 39" stroke="#ffc83a" stroke-width="4" stroke-linecap="round"/></svg><span class="ot"><b>Normal</b><span>Lidt hjælp. Du styrer selv, og kanterne er bløde, så du ikke falder i vandet.</span></span></button>
+      <button class="opt" id="opt-0" data-lvl="0" role="radio" aria-checked="false"><svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true"><g transform="rotate(-24 22 22)"><circle cx="22" cy="22" r="17" fill="none" stroke="#ff5a5f" stroke-width="5"/><circle cx="22" cy="22" r="5" fill="#ff5a5f"/><path d="M22 22 L7 19 M22 22 L37 19 M22 22 L22 39" stroke="#ff5a5f" stroke-width="4" stroke-linecap="round"/></g><path d="M36 30 q4 4 0 8 M40 27 q6 7 0 14" stroke="#17a5bd" stroke-width="3" fill="none" stroke-linecap="round"/></svg><span class="ot"><b>Skør Chauffør</b><span>Ingen hjælp og ingen bløde kanter. Pas på, du kan køre i vandet!</span></span></button>
+    </div>
+    <button class="btn alt small" data-back>Back</button>
   </section>
 
   <!-- HOW -->
@@ -256,7 +279,7 @@ h1,h2,h3{font-family:var(--display);font-weight:400;margin:0;text-wrap:balance;l
       <button class="btn" id="resume">Resume</button>
       <button class="btn alt" id="calib">Calibrate steering</button>
       <button class="btn alt" id="invert">Invert steering</button>
-      <button class="btn alt" id="assist">Steering help: Some</button>
+      <button class="btn alt" id="assist">Styring: Normal</button>
       <button class="btn alt" id="sound">Sound: on</button>
       <button class="btn alt" id="gfx">Graphics: High</button>
       <button class="btn alt" id="quit">Quit race</button>
@@ -1276,15 +1299,17 @@ function buildShowroom(){
   scene.add(showroom);if(envMode!=='studio')studioEnv();tuneEnv(showroom);
 }
 /* ================= SCREENS ================= */
-const SCREENS=['title','select','garage','how','pause','results'];
+const SCREENS=['title','select','garage','how','settings','pause','results'];
 let screenStack=[];
 function show(id){SCREENS.forEach(s=>$('#'+s).hidden=s!==id);$('#hud').hidden=!(id==='hud'||id==='pause');if(id==='pause')$('#pause').hidden=false;$$('.bank').forEach(e=>e.textContent=save.coins);}
 function menu(id){if(state!=='menu'){clearWorld();state='menu';if(eng&&AC)eng.g.gain.setTargetAtTime(0,AC.currentTime,.1);try{wakeLock&&wakeLock.release();}catch(e){}}buildShowroom();show(id);
   if(id==='select')Object.keys(TRACKS).forEach(k=>{const b=save.best[k];$(`[data-best="${k}"]`).textContent='Best time: '+(b?fmt(b):'–');});
-  if(id==='garage')renderGarage();}
+  if(id==='garage')renderGarage();
+  if(id==='settings')renderSettings();}
 $('#goSelect').onclick=()=>{initAudio();menu('select');};
 $('#goGarage').onclick=()=>{initAudio();menu('garage');};
 $('#goHow').onclick=()=>menu('how');
+$('#goSettings').onclick=()=>{initAudio();menu('settings');};
 $$('[data-back]').forEach(b=>b.onclick=()=>menu('title'));
 $$('[data-track]').forEach(b=>b.onclick=async()=>{initAudio();if(AC&&AC.state==='suspended')AC.resume();await askMotion();
   try{const de=document.documentElement;if(de.requestFullscreen&&!document.fullscreenElement&&matchMedia('(pointer:coarse)').matches){await de.requestFullscreen().catch(()=>{});screen.orientation&&screen.orientation.lock&&screen.orientation.lock('landscape').catch(()=>{});}}catch(e){}
@@ -1294,8 +1319,11 @@ function resumeGame(){state='race';show('hud');if(eng)eng.g.gain.setTargetAtTime
 $('#btnPause').onclick=pauseGame;$('#resume').onclick=resumeGame;
 $('#calib').onclick=()=>{calibrate();$('#pnote').textContent=tilt.active?'Rattet er nulstillet. Hold telefonen, som du vil køre ligeud.':'Ingen bevægelsessensor fundet. Åbn spillet fra din arcade på telefonen og tryk Allow motion.';};
 const ALVL=()=>save.assistLvl!=null?save.assistLvl:(save.assist===false?0:1);const EASY=()=>ALVL()>0;
-function assistLabel(){$('#assist').textContent='Steering help: '+['Off','Some','Max'][ALVL()];}
-$('#assist').onclick=()=>{const l=ALVL();save.assistLvl=l===0?2:l-1;store();assistLabel();$('#pnote').textContent=['Ingen styrehjælp. Fra næste løb kan man køre i vandet igen.','Lidt styrehjælp: bilen hjælper en smule, men du styrer selv.','Meget styrehjælp: bilen styrer næsten selv og bremser før sving.'][ALVL()];};assistLabel();
+const ANAMES=['Skør Chauffør','Normal','Auto-auto'];
+function assistLabel(){$('#assist').textContent='Styring: '+ANAMES[ALVL()];}
+function renderSettings(){$$('.opt').forEach(b=>b.setAttribute('aria-checked',String(+b.dataset.lvl===ALVL())));}
+$$('.opt').forEach(b=>b.onclick=()=>{save.assistLvl=+b.dataset.lvl;store();renderSettings();assistLabel();sfx.got();});
+$('#assist').onclick=()=>{const l=ALVL();save.assistLvl=l===0?2:l-1;store();assistLabel();$('#pnote').textContent=['Skør Chauffør: ingen hjælp. Fra næste løb kan man køre i vandet.','Normal: bilen hjælper en smule, men du styrer selv.','Auto-auto: bilen styrer næsten selv og bremser før sving.'][ALVL()];};assistLabel();
 $('#invert').onclick=()=>{save.invert=!save.invert;store();$('#pnote').textContent=save.invert?'Styreretningen er byttet om.':'Styreretningen er normal.';};
 $('#sound').onclick=()=>setSound(!save.sound);setSound(save.sound);
 $('#quit').onclick=()=>menu('title');
