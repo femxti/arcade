@@ -168,7 +168,10 @@ h1,h2,h3{font-family:var(--display);font-weight:400;margin:0;text-wrap:balance;l
 .opt[aria-checked="true"]{border-color:var(--sun);background:rgba(255,200,58,.16);box-shadow:0 0 0 3px rgba(255,200,58,.22)}
 .opt[aria-checked="true"] b::after{content:"  \2713";color:var(--sun)}
 .opt:focus-visible{outline:3px solid var(--sun);outline-offset:3px}
-@media (max-height:430px){#settings h2{font-size:28px!important}#settings .tag{display:none}#settings{gap:10px}.opts{gap:7px}.opt{padding:7px 14px}.opt b{font-size:18px}.opt .ot>span{font-size:12px}.opt svg{width:34px;height:34px}}
+.wtest{display:flex;align-items:center;gap:12px;width:100%;max-width:540px;box-sizing:border-box;background:var(--glass);border:2px dashed var(--line);border-radius:16px;padding:8px 12px}
+.wtest p{margin:0;flex:1 1 auto;min-width:0;font-size:13px;font-weight:700;line-height:1.35}
+.wtest .btn,#testwheel{flex:none}
+@media (max-height:430px){#testwheel{width:44px;height:44px}.wtest{padding:5px 10px}#settings h2{font-size:28px!important}#settings .tag{display:none}#settings{gap:10px}.opts{gap:7px}.opt{padding:7px 14px}.opt b{font-size:18px}.opt .ot>span{font-size:12px}.opt svg{width:34px;height:34px}}
 </style>
 
 <canvas id="game" aria-label="KayaKart racerbane"></canvas>
@@ -232,6 +235,11 @@ h1,h2,h3{font-family:var(--display);font-weight:400;margin:0;text-wrap:balance;l
       <button class="opt" id="opt-1" data-lvl="1" role="radio" aria-checked="false"><svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true"><circle cx="22" cy="22" r="17" fill="none" stroke="#ffc83a" stroke-width="5"/><circle cx="22" cy="22" r="5" fill="#ffc83a"/><path d="M22 22 L7 19 M22 22 L37 19 M22 22 L22 39" stroke="#ffc83a" stroke-width="4" stroke-linecap="round"/></svg><span class="ot"><b>Normal</b><span>Lidt hjælp. Du styrer selv, og kanterne er bløde, så du ikke falder i vandet.</span></span></button>
       <button class="opt" id="opt-0" data-lvl="0" role="radio" aria-checked="false"><svg width="44" height="44" viewBox="0 0 44 44" aria-hidden="true"><g transform="rotate(-24 22 22)"><circle cx="22" cy="22" r="17" fill="none" stroke="#ff5a5f" stroke-width="5"/><circle cx="22" cy="22" r="5" fill="#ff5a5f"/><path d="M22 22 L7 19 M22 22 L37 19 M22 22 L22 39" stroke="#ff5a5f" stroke-width="4" stroke-linecap="round"/></g><path d="M36 30 q4 4 0 8 M40 27 q6 7 0 14" stroke="#17a5bd" stroke-width="3" fill="none" stroke-linecap="round"/></svg><span class="ot"><b>Skør Chauffør</b><span>Ingen hjælp og ingen bløde kanter. Pas på, du kan køre i vandet!</span></span></button>
     </div>
+    <div class="wtest">
+      <svg id="testwheel" width="58" height="58" viewBox="0 0 100 100" aria-hidden="true"><g id="testwheelg"><circle cx="50" cy="50" r="40" fill="none" stroke="#fff5e4" stroke-width="10"/><circle cx="50" cy="50" r="11" fill="#e3262e"/><path d="M50 50 L14 44 M50 50 L86 44 M50 50 L50 90" stroke="#fff5e4" stroke-width="9" stroke-linecap="round"/><rect x="44" y="4" width="12" height="13" rx="3" fill="#e3262e"/></g></svg>
+      <p id="testmsg">Rat-test: drej telefonen som et rat. Rattet her skal dreje samme vej.</p>
+      <button class="btn alt small" id="invert2">Invert steering: Off</button>
+    </div>
     <button class="btn alt small" data-back>Back</button>
   </section>
 
@@ -278,7 +286,6 @@ h1,h2,h3{font-family:var(--display);font-weight:400;margin:0;text-wrap:balance;l
     <div class="row" style="flex-direction:column;align-items:stretch;min-width:240px">
       <button class="btn" id="resume">Resume</button>
       <button class="btn alt" id="calib">Calibrate steering</button>
-      <button class="btn alt" id="invert">Invert steering</button>
       <button class="btn alt" id="assist">Styring: Normal</button>
       <button class="btn alt" id="sound">Sound: on</button>
       <button class="btn alt" id="gfx">Graphics: High</button>
@@ -317,6 +324,7 @@ const wrapA=a=>{while(a>Math.PI)a-=TAU;while(a<-Math.PI)a+=TAU;return a};
 /* ================= SAVE ================= */
 const save={coins:0,paints:['rod'],outfits:['hjelm'],paint:'rod',outfit:'hjelm',invert:false,sound:true,best:{}};
 try{const s=JSON.parse(localStorage.getItem('kayakart-v1')||'null');if(s)Object.assign(save,s);}catch(e){}
+if(!(save.v>=2)){save.invert=false;save.v=2;try{localStorage.setItem('kayakart-v1',JSON.stringify(save));}catch(e){}}
 function store(){try{localStorage.setItem('kayakart-v1',JSON.stringify(save));}catch(e){}}
 
 const PAINTS=[
@@ -1305,7 +1313,7 @@ function show(id){SCREENS.forEach(s=>$('#'+s).hidden=s!==id);$('#hud').hidden=!(
 function menu(id){if(state!=='menu'){clearWorld();state='menu';if(eng&&AC)eng.g.gain.setTargetAtTime(0,AC.currentTime,.1);try{wakeLock&&wakeLock.release();}catch(e){}}buildShowroom();show(id);
   if(id==='select')Object.keys(TRACKS).forEach(k=>{const b=save.best[k];$(`[data-best="${k}"]`).textContent='Best time: '+(b?fmt(b):'–');});
   if(id==='garage')renderGarage();
-  if(id==='settings')renderSettings();}
+  if(id==='settings'){renderSettings();askMotion();calibrate();}}
 $('#goSelect').onclick=()=>{initAudio();menu('select');};
 $('#goGarage').onclick=()=>{initAudio();menu('garage');};
 $('#goHow').onclick=()=>menu('how');
@@ -1324,7 +1332,9 @@ function assistLabel(){$('#assist').textContent='Styring: '+ANAMES[ALVL()];}
 function renderSettings(){$$('.opt').forEach(b=>b.setAttribute('aria-checked',String(+b.dataset.lvl===ALVL())));}
 $$('.opt').forEach(b=>b.onclick=()=>{save.assistLvl=+b.dataset.lvl;store();renderSettings();assistLabel();sfx.got();});
 $('#assist').onclick=()=>{const l=ALVL();save.assistLvl=l===0?2:l-1;store();assistLabel();$('#pnote').textContent=['Skør Chauffør: ingen hjælp. Fra næste løb kan man køre i vandet.','Normal: bilen hjælper en smule, men du styrer selv.','Auto-auto: bilen styrer næsten selv og bremser før sving.'][ALVL()];};assistLabel();
-$('#invert').onclick=()=>{save.invert=!save.invert;store();$('#pnote').textContent=save.invert?'Styreretningen er byttet om.':'Styreretningen er normal.';};
+function invertLabel(){$('#invert2').textContent='Invert steering: '+(save.invert?'On':'Off');}
+function toggleInvert(){save.invert=!save.invert;store();invertLabel();}
+$('#invert2').onclick=toggleInvert;invertLabel();
 $('#sound').onclick=()=>setSound(!save.sound);setSound(save.sound);
 $('#quit').onclick=()=>menu('title');
 $('#gfx').onclick=()=>{save.gfxManual=true;setGfx(GFX.level==='high'?'low':'high');};$('#gfx').textContent='Graphics: '+(GFX.level==='high'?'High':'Low');
@@ -1370,6 +1380,7 @@ let last=performance.now(),acc=0;
 function frame(now){
   requestAnimationFrame(frame);
   const rawDt=Math.max(0,(now-last)/1000);let dt=Math.min(.05,rawDt);last=now;
+  if(state==='menu'&&!$('#settings').hidden){if(tilt.active&&tilt.a0==null)calibrate();readSteer(dt);$('#testwheelg').setAttribute('transform','rotate('+(input.steer*90).toFixed(1)+' 50 50)');$('#testmsg').textContent=(tilt.active&&performance.now()-tilt.last<800)?'Rat-test: drej telefonen som et rat. Rattet her skal dreje samme vej. Gør det ikke det, så tryk på knappen.':'Rat-test: åbn spillet på telefonen fra din arcade for at teste rattet. På computer: pil venstre/højre.';}
   if(state==='menu'){if(showKart){showKart.group.rotation.y+=dt*.6;showKart.wheels.forEach(w=>w.rotation.x+=dt*2);}const a=now/6000;camera.position.set(Math.sin(a)*1.5+7,3.6,9);camera.lookAt(0,1.2,0);camera.fov=innerWidth<innerHeight?70:50;camera.updateProjectionMatrix();render();return;}
   if(state==='paused'||state==='results'){render();return;}
   readSteer(dt);
